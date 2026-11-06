@@ -34,9 +34,13 @@ overlays.default                                      # pkgs.omnigent, pkgs.omni
 checks.<system>.*  formatter.<system>
 ```
 
-Systems: `x86_64-linux` (built and tested), `aarch64-linux`, `aarch64-darwin`,
-`x86_64-darwin` (evaluate; not built). The desktop and the runner image are
-a macOS desktop bundle is not built yet (a packaging limitation of this flake, not of Omnigent): this flake does not yet build a macOS desktop bundle; on macOS use the upstream app. `programs.omnigent.desktop.enable` on darwin fails with an explicit assertion saying so.
+Systems: `x86_64-linux` (built and tested), `aarch64-linux` and `aarch64-darwin`
+(evaluate; not built). `x86_64-darwin` is dropped because nixpkgs 26.11 no longer
+supports it. The desktop and the runner image are Linux outputs. This flake does
+not yet build a macOS desktop bundle; on macOS use the upstream app (a packaging
+limitation of this flake, not a property of Omnigent), and
+`programs.omnigent.desktop.enable` on darwin fails with an explicit assertion
+saying so.
 
 ## Server (NixOS)
 
