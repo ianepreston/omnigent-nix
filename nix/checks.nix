@@ -269,31 +269,120 @@ let
           touch $out
         '';
 
-    # Runtime guard: a secrets path that is a symlink into the store is refused.
+    # Runtime guard (runs as root under `env -i` in the unit). Tested here as an
+    # unprivileged user by pointing the expected owner at ourselves.
     secret-path-guard =
       let
-        cmd = (svc uriFileServer).serviceConfig.ExecStartPre;
-        guardBin = lib.removePrefix "+" (builtins.head (lib.splitString " " (builtins.head cmd)));
+        cmd = builtins.head (svc uriFileServer).serviceConfig.ExecStartPre;
+        # "+<coreutils>/bin/env -i <guard> <files...>"
+        guardBin = builtins.elemAt (lib.splitString " " cmd) 2;
       in
       pkgs.runCommand "secret-path-guard" { } ''
+        export OMNIGENT_GUARD_OWNER_UID=$(id -u)
         echo secret > plain
         ln -s ${pkgs.hello}/bin/hello via-store
         ln -s ${builtins.storeDir} exact-store
-        ${guardBin} plain
-        ! ${guardBin} via-store 2>/dev/null
-        ! ${guardBin} exact-store 2>/dev/null
-        ! ${guardBin} missing-file 2>/dev/null
+        mkdir -m 777 open-dir
+        echo secret > open-dir/f
+        ${guardBin} $PWD/plain
+        ! ${guardBin} $PWD/via-store 2>/dev/null
+        ! ${guardBin} $PWD/exact-store 2>/dev/null
+        ! ${guardBin} $PWD/missing-file 2>/dev/null
+        # in a world-writable directory: swappable by another user, refused
+        ! ${guardBin} $PWD/open-dir/f 2>/dev/null
+        # owned by someone other than the expected (root) uid: refused
+        unset OMNIGENT_GUARD_OWNER_UID
+        ! ${guardBin} $PWD/plain 2>/dev/null
         touch $out
       '';
-    guard-wired-into-unit = assertEval "guard-wired-into-unit" (
-      lib.hasPrefix "+" (builtins.head (svc uriFileServer).serviceConfig.ExecStartPre)
-      && lib.hasInfix "/run/secrets/omnigent.env" (
-        builtins.head (svc uriFileServer).serviceConfig.ExecStartPre
-      )
-      && lib.hasInfix "/run/secrets/omnigent-database-uri" (
-        builtins.head (svc uriFileServer).serviceConfig.ExecStartPre
-      )
-    ) "secret path guard is not wired into ExecStartPre with both files";
+    guard-wired-into-unit =
+      let
+        u = svc uriFileServer;
+        cmd = builtins.head u.serviceConfig.ExecStartPre;
+      in
+      assertEval "guard-wired-into-unit" (
+        lib.hasPrefix "+" cmd
+        # clean environment, so no unit/secret variable reaches the root helper
+        && lib.hasInfix "/bin/env -i " cmd
+        && lib.hasInfix "/run/secrets/omnigent.env" cmd
+        && lib.hasInfix "/run/secrets/omnigent-database-uri" cmd
+        # the secrets file is a credential, never an EnvironmentFile
+        && !(u.serviceConfig ? EnvironmentFile)
+      ) "guard/credential wiring is wrong";
+
+    # The environment credential is parsed, never sourced; only an allowlist of
+    # keys is accepted and module-controlled settings win.
+    env-credential-parsing =
+      let
+        stub = pkgs.writeShellScriptBin "omnigent-server" ''
+          echo "HOST=$HOST"
+          echo "AUTH=$OMNIGENT_AUTH_ENABLED"
+          echo "OIDC=$OMNIGENT_OIDC_CLIENT_SECRET"
+          echo "LITERAL=$OMNIGENT_OIDC_X"
+          echo "LD=''${LD_PRELOAD-unset}"
+        '';
+        sys = nixos {
+          services.omnigent = {
+            enable = true;
+            package = stub;
+            environmentFile = "/run/secrets/omnigent.env";
+            database.uriFile = "/run/secrets/omnigent-database-uri";
+          };
+        };
+        w = (svc sys).serviceConfig.ExecStart;
+      in
+      pkgs.runCommand "env-credential-parsing" { } ''
+        mkdir cred
+        export CREDENTIALS_DIRECTORY=$PWD/cred
+        echo 'postgresql+psycopg://u@/db?host=/run/postgresql' > cred/database-uri
+        run() { printf '%s\n' "$1" > cred/environment; ${w}; }
+
+        res=$(run '# comment
+
+        OMNIGENT_OIDC_CLIENT_SECRET="abc def"
+        OMNIGENT_OIDC_X=$(touch '"$PWD"'/pwned)')
+        echo "$res"
+        echo "$res" | grep -q '^OIDC=abc def$'
+        echo "$res" | grep -q '^HOST=127.0.0.1$'
+        echo "$res" | grep -q '^AUTH=1$'
+        echo "$res" | grep -q '^LITERAL=\$(touch '
+        test ! -e pwned
+
+        # Disallowed or module-controlled keys stop the service from starting.
+        for bad in 'LD_PRELOAD=/evil.so' 'BASH_ENV=/evil' 'HOST=0.0.0.0' \
+                   'OMNIGENT_AUTH_ENABLED=0' 'OMNIGENT_LOCAL_SINGLE_USER=1' \
+                   'DATABASE_URL=sqlite:///x' 'PATH=/evil' 'no-equals-sign' 'lower=1'; do
+          if run "$bad" >/dev/null 2>&1; then echo "accepted: $bad" >&2; exit 1; fi
+        done
+        touch $out
+      '';
+
+    refuses-forbidden-environment-file-keys = mustFail "forbidden-environment-file-keys" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.sqlite.enable = true;
+        environmentFileKeys = [ "LD_PRELOAD" ];
+      };
+    });
+    refuses-reserved-environment-file-keys = mustFail "reserved-environment-file-keys" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.sqlite.enable = true;
+        environmentFileKeys = [ "OMNIGENT_AUTH_ENABLED" ];
+      };
+    });
+    refuses-non-postgres-uri-scheme = mustFail "non-postgres-uri-scheme" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = "mysql://u@host/db";
+      };
+    });
+    refuses-sqlite-uri-scheme = mustFail "sqlite-uri-scheme" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = "sqlite:///tmp/x.db";
+      };
+    });
 
     hm-host-package-without-override-refused = mustFailHmNoOverride;
 
@@ -305,8 +394,12 @@ let
       in
       assertEval "secrets-stay-out-of-unit" (
         !(u.environment ? DATABASE_URL)
-        && u.serviceConfig.LoadCredential == [ "database-uri:/run/secrets/omnigent-database-uri" ]
-        && u.serviceConfig.EnvironmentFile == [ "/run/secrets/omnigent.env" ]
+        &&
+          u.serviceConfig.LoadCredential == [
+            "database-uri:/run/secrets/omnigent-database-uri"
+            "environment:/run/secrets/omnigent.env"
+          ]
+        && !(u.serviceConfig ? EnvironmentFile)
         && u.serviceConfig.DynamicUser
         && !(u.environment ? HOST)
       ) "unit leaks a secret or loses its hardening/loopback default";
@@ -356,6 +449,8 @@ let
   };
 
   hmChecks = {
+    hm-module-host = evalOnly "hm-module-host" hmHost.activationPackage;
+    hm-module-idle = evalOnly "hm-module-idle" hmIdle.activationPackage;
     # Desktop is intentionally Linux-only: enabling it on darwin is a clear,
     # explained assertion, not an obscure evaluation failure.
     hm-desktop-darwin-explained = assertEval "hm-desktop-darwin-explained" (lib.any
@@ -497,6 +592,48 @@ let
           touch $out
         '';
 
+    # End-to-end tunnel handshake with the pinned websockets: a loopback server
+    # (single-user mode, test only) and `omnigent host --server`, which dials the
+    # server's websocket tunnel and registers. Asserts the server lists exactly
+    # that host as online. Not covered: running a session on the host (needs a
+    # harness CLI and model credentials, deliberately absent from the sandbox).
+    host-tunnel =
+      pkgs.runCommand "omnigent-host-tunnel"
+        {
+          nativeBuildInputs = [
+            p.omnigent
+            p.omnigent-host
+            pkgs.curl
+            pkgs.jq
+          ];
+        }
+        ''
+          export HOME=$TMPDIR
+          export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+          port=18772
+          HOST=127.0.0.1 PORT=$port ARTIFACT_DIR=$TMPDIR/artifacts \
+            DATABASE_URL=sqlite:///$TMPDIR/omnigent.db OMNIGENT_AUTH_ENABLED=0 \
+            omnigent-server > server.log 2>&1 &
+          spid=$!
+          trap 'kill $spid $hpid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -sf http://127.0.0.1:$port/health >/dev/null && break; sleep 1; done
+
+          OMNIGENT_DATA_DIR=$TMPDIR/data OMNIGENT_CONFIG_HOME=$TMPDIR/config \
+            ${p.omnigent-host}/bin/omnigent host --server http://127.0.0.1:$port --non-interactive --no-open > host.log 2>&1 &
+          hpid=$!
+
+          ok=
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:$port/v1/hosts -o hosts.json || true
+            if [ "$(jq -r '[.hosts[]? | select(.status == "online")] | length' hosts.json 2>/dev/null)" = 1 ]; then ok=1; break; fi
+            kill -0 $hpid 2>/dev/null || break
+            sleep 1
+          done
+          if [ -z "$ok" ]; then cat server.log host.log; echo "host never registered online" >&2; exit 1; fi
+          grep -q 'Connected as' host.log
+          touch $out
+        '';
+
     web-ui-bundled = pkgs.runCommand "omnigent-web-ui-bundled" { } ''
       d=${p.omnigent.passthru.omnigent-lib}/${pkgs.python3.sitePackages}/omnigent/server/static/web-ui
       test -f $d/index.html
@@ -523,6 +660,10 @@ let
 
   desktopChecks = lib.optionalAttrs isLinux {
     pkg-omnigent-desktop = p.omnigent-desktop;
+
+    electron-major-matches-upstream = assertEval "electron-major-matches-upstream" (
+      lib.versions.major p.omnigent-desktop.passthru.electron.version == "45"
+    ) "desktop is not on upstream's Electron major (45)";
 
     desktop-headless-launch =
       pkgs.runCommand "omnigent-desktop-headless-launch"

@@ -16,7 +16,20 @@ not make the machine a host. A host runs arbitrary agent work with the
 installing user's files, network and credentials, so nothing here starts one
 unless you set `programs.omnigent.host.autoStart = true`.
 
-This flake tracks **nixos-unstable** (and Home Manager `master`), because Omnigent moves fast and wants newer dependencies. Consumers should set `inputs.omnigent.inputs.nixpkgs.follows = "nixpkgs"` (and `home-manager.follows` if they import it) so there is a single nixpkgs; build the packages with the nixpkgs revision you test against.
+This flake tracks **nixos-unstable** (and Home Manager `master`) because the
+desktop needs `electron_45` and Omnigent moves fast. A consumer that pins a
+stable `nixpkgs` (for example `nixos-26.05`, which has no `electron_45`) must not
+point this flake at it. Either leave this flake's own nixpkgs alone, or follow an
+unstable one:
+
+```nix
+inputs.omnigent.inputs.nixpkgs.follows = "nixpkgs-unstable";
+```
+
+Following a nixpkgs without `electron_45` makes `omnigent-desktop` fail
+evaluation with a message saying exactly that; the server and host packages do
+not need Electron. Python dependencies that upstream pins are built from the
+locked releases, so they do not depend on the nixpkgs revision.
 
 The package and modules are one lockstep unit pinned to a single upstream
 release (**v0.21.0**). Omnigent's self-updater (`omni upgrade`) and the desktop
@@ -48,7 +61,7 @@ saying so.
 {
   inputs.omnigent.url = "github:ianepreston/omnigent-nix";
   # One nixpkgs: this flake tracks nixos-unstable, so make it follow yours.
-  inputs.omnigent.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.omnigent.inputs.nixpkgs.follows = "nixpkgs-unstable"; # needs electron_45 for the desktop
 
   outputs = { nixpkgs, omnigent, ... }: {
     nixosConfigurations.server = nixpkgs.lib.nixosSystem {
@@ -58,7 +71,7 @@ saying so.
           services.omnigent = {
             enable = true;
             publicUrl = "https://omnigent.example.net";
-            environmentFile = "/run/secrets/omnigent.env";          # OIDC/cookie secrets
+            environmentFile = "/run/secrets/omnigent.env";          # KEY=VALUE secrets, root-owned dir
             database.uriFile = "/run/secrets/omnigent-database-uri"; # postgresql+psycopg://…
           };
           # Bring your own proxy; the listener is http://127.0.0.1:8000 by default.
@@ -77,15 +90,38 @@ What the core module does and does not do:
 * Runs `omnigent-server` (upstream's external-runners-only entrypoint) as a
   hardened `DynamicUser` unit with `StateDirectory`. The server never executes
   agent work; do not register the server machine as a host.
-* Module-controlled variables (host, port, database, auth, config path, update switches) are rejected in `environment`, and the start wrapper re-exports them after systemd reads `environmentFile`, so neither can weaken validation. Authentication cannot be turned off from the environment.
-* `environmentFile` and `database.uriFile` must be runtime paths outside the Nix store, and a privileged `ExecStartPre` guard refuses to start if either resolves (through symlinks) into `/nix/store`. A literal `database.uri` is accepted only in an allowlisted passwordless form (bare username, allowlisted plain query keys); anything else must use `uriFile`.
+* **Secret files** (`environmentFile`, `database.uriFile`) are delivered with
+  systemd `LoadCredential=` (opened by PID 1), never `EnvironmentFile=`, which
+  would hand variables such as `LD_PRELOAD` to a root helper. The unprivileged
+  start wrapper *parses* the environment credential (it is never sourced) and
+  accepts only an allowlist: `OMNIGENT_OIDC_*`, `OMNIGENT_GITHUB_APP_*`,
+  `OMNIGENT_CREDENTIAL_*`, `OMNIGENT_ACCOUNTS_COOKIE_SECRET`,
+  `OMNIGENT_ARTIFACT_URI`, `AWS_*` S3 credentials, plus
+  `environmentFileKeys`. Anything else, including every module-controlled
+  variable, stops the service from starting.
+* A root `ExecStartPre` guard (run under `env -i`, so no secret or unit variable
+  reaches it) refuses to start if a secret file resolves into `/nix/store`, or
+  if the path (and its resolved target) is not on a chain of root-owned,
+  non-group/world-writable components, so an unprivileged user cannot swap the
+  source. Residual race: the credential is loaded by PID 1 before the guard
+  runs, so the guard checks that the *source could not have been swapped by an
+  unprivileged user*, not the loaded bytes; a root-equivalent attacker is out of
+  scope.
+* Module-controlled variables (host, port, database, auth, config path, update
+  switches) are rejected in `environment` and force-set or unset by the wrapper
+  after the credential is read. Authentication cannot be turned off from the
+  environment.
+* A literal `database.uri` is accepted only as `postgresql://`,
+  `postgresql+psycopg://` or `postgres://` in an allowlisted passwordless form
+  (bare username, allowlisted plain query keys); anything else must use
+  `uriFile`.
 * Binds loopback. A non-loopback `listen.address` fails evaluation unless
   `auth.provider` is set explicitly.
 * Exactly one database source is required: `database.uriFile` (preferred, a
   systemd credential), `database.uri` (warns if it contains a password), or
   `database.sqlite.enable` (single-instance development only).
 * `settings` is non-secret YAML rendered into the store. Secrets only ever come
-  from `environmentFile` / `database.uriFile`, read by systemd at start.
+  from the `environmentFile` / `database.uriFile` credentials.
 * It owns no proxy, database service, secret manager, firewall or backups. It
   publishes `listen`, `listenUrl`, `publicUrl` and `healthPath` (`/health`) for
   your own integration.
@@ -194,16 +230,11 @@ is not set up yet.
 
 ## Known limitations
 
-* Pins nixpkgs-unstable still overshoots, relaxed in `pythonRelaxDeps`
-  (`nix/omnigent.nix`): `openai` 2.53 (upstream `<2.45`), `websockets` 17
-  (`<15`, a macOS client hang; Linux is exercised by the server smoke test, but
-  there is no automated host-to-server tunnel test yet), and `certifi`
-  2026.7.22 (upstream floor 2026.10.19, a CA-bundle floor). Everything else,
-  including the pins relaxed on 26.05, is satisfied unrelaxed.
-* Two nixpkgs inconsistencies are worked around, not relaxed: `mcp` is pinned to
-  upstream's 1.30.0 (unstable's 2.x lacks APIs omnigent imports; this is caught
-  by the package import check), and `openai-agents` skips nixpkgs' own
-  runtime-deps check (it declares `openai>=3`); it is import-checked instead.
+* Python dependencies that upstream pins are built from upstream's locked
+  releases (`pythonPins` in `nix/source.nix`: `openai` 2.41.0, `openai-agents`
+  0.13.6, `mcp` 1.30.0, `websockets` 14.2, `certifi` 2026.10.19) with every
+  runtime-deps check on and no `pythonRelaxDeps`. Other dependencies track
+  nixpkgs.
 * This flake does not yet build a macOS desktop bundle; on macOS use the upstream
   app. (A packaging limitation of this flake, not a property of Omnigent.)
 * `omnigent-runner-image` and the `withKubernetes` variant

@@ -12,34 +12,36 @@
   withKubernetes ? false,
 }:
 let
-  # nixpkgs-unstable's openai-agents declares `openai>=3` and `websockets`
-  # extras that its own set does not satisfy, so it fails nixpkgs' runtime-deps
-  # check. That inconsistency is inside nixpkgs; skip the check for that one
-  # package and prove it works with `pythonImportsCheck = [ "agents" ]` below.
-  python = python3.override {
-    self = python;
-    packageOverrides = _: prev: {
-      # nixpkgs-unstable ships mcp 2.x, which dropped APIs omnigent imports
-      # (`streamablehttp_client`). Use the 1.x release upstream locks.
-      mcp = prev.mcp.overridePythonAttrs (o: {
-        inherit (upstream.mcp) version;
+  # Build the ABI-sensitive dependencies at the versions upstream locks (see
+  # `pythonPins` in source.nix) so every runtime-deps check passes unrelaxed.
+  pin =
+    prev: name:
+    prev.${name}.overridePythonAttrs (
+      o:
+      let
+        v = upstream.pythonPins.${name};
+      in
+      {
+        inherit (v) version;
         src = prev.fetchPypi {
-          pname = "mcp";
-          inherit (upstream.mcp) version;
-          sha256 = upstream.mcp.sha256;
+          pname = v.sdistName;
+          inherit (v) version sha256;
         };
         patches = [ ];
-        # 2.x split types into a separate package that 1.x does not have.
+        doCheck = false;
+      }
+      // lib.optionalAttrs (name == "mcp") {
+        # 2.x split types into a separate package that 1.x does not have, and
+        # 1.x needs two packages the 2.x set dropped.
         dependencies = lib.filter (d: (d.pname or "") != "mcp-types") (o.dependencies or [ ]) ++ [
           prev.httpx-sse
           prev.pydantic-settings
         ];
-        doCheck = false;
-      });
-      openai-agents = prev.openai-agents.overridePythonAttrs (o: {
-        dontCheckRuntimeDeps = true;
-      });
-    };
+      }
+    );
+  python = python3.override {
+    self = python;
+    packageOverrides = _: prev: lib.genAttrs (lib.attrNames upstream.pythonPins) (pin prev);
   };
   py = python.pkgs;
 
@@ -173,17 +175,6 @@ let
         omnigent-client
         omnigent-ui-sdk
       ];
-
-    # Pins nixpkgs-unstable overshoots (checked against v0.21.0's constraints):
-    #   openai     2.53 vs <2.45  (upstream lock 2.41)
-    #   websockets 17   vs <15    (upstream lock 14.2; macOS client hang, Linux unaffected)
-    #   certifi    2026.7.22 vs >=2026.10.19 (CA bundle floor)
-    # Everything else, including the former 26.05 pins, is satisfied unrelaxed.
-    pythonRelaxDeps = [
-      "openai"
-      "websockets"
-      "certifi"
-    ];
 
     # The package's own pytest suite needs network, harness CLIs and a database;
     # behaviour is covered by `checks.*`.

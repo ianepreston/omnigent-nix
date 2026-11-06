@@ -34,7 +34,14 @@ in
 }
 // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
   omnigent-desktop = pkgs.callPackage ./desktop.nix {
-    electron = pkgs.electron_45;
+    # The desktop targets upstream's Electron major (45). Older nixpkgs (for
+    # example nixos-26.05) have no electron_45: fail with an actionable message.
+    electron =
+      pkgs.electron_45 or (throw ''
+        omnigent-nix: the supplied nixpkgs has no `electron_45` (needs nixos-unstable or newer).
+        Leave this flake's own nixpkgs input alone, or point it at an unstable nixpkgs, e.g.
+          inputs.omnigent.inputs.nixpkgs.follows = "nixpkgs-unstable";
+      '');
     inherit
       omnigent
       upstream

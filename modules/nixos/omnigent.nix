@@ -42,7 +42,7 @@ let
   ];
   uriParts =
     if hasUri then
-      builtins.match "([a-z][a-z0-9+.-]*)://(([A-Za-z0-9_.-]+)@)?([]A-Za-z0-9_.:[-]*)(/[A-Za-z0-9_./-]*)?(\\?([^#]*))?" cfg.database.uri
+      builtins.match "(postgresql|postgresql\\+psycopg|postgres)://(([A-Za-z0-9_.-]+)@)?([]A-Za-z0-9_.:[-]*)(/[A-Za-z0-9_./-]*)?(\\?([^#]*))?" cfg.database.uri
     else
       null;
   safeQuery =
@@ -64,7 +64,7 @@ let
   ];
 
   # Names the module controls. They are rejected in `environment` and re-forced
-  # by the start wrapper after systemd has read `environmentFile`, so neither a
+  # by the start wrapper after it has read the `environmentFile` credential, so neither a
   # caller nor a runtime secrets file can weaken the validated configuration.
   reservedEnv = [
     "HOST"
@@ -85,27 +85,84 @@ let
   inStore =
     path: toString path == builtins.storeDir || lib.hasPrefix "${builtins.storeDir}/" (toString path);
 
-  # Runtime counterpart of the lexical store-path assertions: a path such as
-  # /run/secrets/x may be a symlink into the store. Runs privileged (`+`)
-  # before the service starts and refuses if any secret file resolves there.
+  # Secret files are delivered with systemd `LoadCredential=` (opened by PID 1,
+  # never `EnvironmentFile=`, which would feed attacker-influenced variables such
+  # as LD_PRELOAD to a privileged helper). This guard runs as root under
+  # `env -i`, i.e. with no secret and no unit environment, and refuses to start
+  # unless every credential source (a) does not resolve into the Nix store and
+  # (b) sits on a chain of root-owned, not group/world-writable directories, so
+  # an unprivileged user cannot swap what the path points at between this check
+  # and the (already completed) credential load. Residual: a root-equivalent
+  # attacker can still race it; that is outside this threat model.
   guard = pkgs.writeShellScript "omnigent-secret-path-guard" ''
     set -eu
+    PATH=${pkgs.coreutils}/bin
+    owner=''${OMNIGENT_GUARD_OWNER_UID:-0}
+
+    fail() { echo "omnigent: secret file $f: $1; refusing to start" >&2; exit 1; }
+
+    # Every path component must be owned by $owner; real directories must not
+    # be group/world-writable (symlinks carry no meaningful mode).
+    check_chain() {
+      local acc="" part u m t
+      local -a parts
+      IFS=/ read -ra parts <<< "''${1#/}"
+      for part in "''${parts[@]}"; do
+        acc="$acc/$part"
+        read -r u m t < <(stat -c '%u %a %F' -- "$acc")
+        [ "$u" = "$owner" ] || fail "$acc is not owned by uid $owner"
+        case "$t" in
+          symbolic*) ;;
+          *) [ $(( 0$m & 022 )) -eq 0 ] || fail "$acc is group/world-writable" ;;
+        esac
+      done
+    }
+
     for f in "$@"; do
-      r=$(${pkgs.coreutils}/bin/realpath -e -- "$f") || {
-        echo "omnigent: cannot resolve secret file $f" >&2
-        exit 1
-      }
+      r=$(realpath -e -- "$f") || fail "cannot be resolved"
       case "$r" in
-        ${builtins.storeDir}|${builtins.storeDir}/*)
-          echo "omnigent: secret file $f resolves into the Nix store ($r); refusing to start" >&2
-          exit 1
-          ;;
+        ${builtins.storeDir}|${builtins.storeDir}/*) fail "resolves into the Nix store ($r)" ;;
       esac
+      check_chain "$f"
+      check_chain "$r"
     done
   '';
   guardedFiles =
     lib.optional (cfg.environmentFile != null) (toString cfg.environmentFile)
     ++ lib.optional hasUriFile (toString cfg.database.uriFile);
+
+  # `environmentFile` is parsed by the unprivileged start wrapper (never sourced
+  # as shell) and only these variables are accepted from it.
+  envAllowedExact = [
+    "OMNIGENT_ACCOUNTS_COOKIE_SECRET"
+    "OMNIGENT_ARTIFACT_URI"
+    "AWS_ACCESS_KEY_ID"
+    "AWS_SECRET_ACCESS_KEY"
+    "AWS_SESSION_TOKEN"
+    "AWS_REGION"
+  ]
+  ++ cfg.environmentFileKeys;
+  envAllowedPrefixes = [
+    "OMNIGENT_OIDC_"
+    "OMNIGENT_GITHUB_APP_"
+    "OMNIGENT_CREDENTIAL_"
+  ];
+  envAllowedPattern = lib.concatStringsSep "|" (
+    envAllowedExact ++ map (x: "${x}*") envAllowedPrefixes
+  );
+  badExtraKeys = lib.filter (
+    k:
+    builtins.match "[A-Z][A-Z0-9_]*" k == null
+    || lib.elem k reservedEnv
+    || lib.any (x: lib.hasPrefix x k) [
+      "LD_"
+      "BASH"
+      "PYTHON"
+      "SYSTEMD"
+      "CREDENTIALS"
+      "PATH"
+    ]
+  ) cfg.environmentFileKeys;
 
   bracketed =
     if lib.hasInfix ":" cfg.listen.address then "[${cfg.listen.address}]" else cfg.listen.address;
@@ -114,9 +171,30 @@ let
 
   # Reads secrets from systemd credentials at start so nothing secret is ever
   # a Nix value, a unit `Environment=` line, or a store path. Security-relevant
-  # settings are exported here, last, so `environmentFile` cannot override them.
+  # settings are exported after the environment credential, so it cannot override them.
   start = pkgs.writeShellScript "omnigent-server-start" ''
     set -eu
+    ${lib.optionalString (cfg.environmentFile != null) ''
+      # Parse KEY=VALUE lines from the credential; never source or eval it.
+      envfile="$CREDENTIALS_DIRECTORY/environment"
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ""|"#"*) continue ;; esac
+        case "$line" in *=*) ;; *) echo "omnigent: malformed line in environmentFile" >&2; exit 1 ;; esac
+        k=''${line%%=*}
+        v=''${line#*=}
+        case "$k" in ""|[!A-Z]*|*[!A-Z0-9_]*) echo "omnigent: invalid variable name in environmentFile" >&2; exit 1 ;; esac
+        case "$k" in
+          ${envAllowedPattern}) ;;
+          *) echo "omnigent: environmentFile sets $k, which is not an allowed variable" >&2; exit 1 ;;
+        esac
+        case "$v" in
+          \"*\") v=''${v#\"}; v=''${v%\"} ;;
+          "'"*"'") v=''${v#"'"}; v=''${v%"'"} ;;
+        esac
+        export "$k=$v"
+      done < "$envfile"
+    ''}
+    # Module-controlled settings last, so nothing above can override them.
     export HOST=${q cfg.listen.address}
     export PORT=${q (toString cfg.listen.port)}
     export ARTIFACT_DIR=${q "${cfg.stateDir}/artifacts"}
@@ -124,7 +202,6 @@ let
     export OMNIGENT_CONFIG=${q "${settingsFile}"}
     export OMNIGENT_MANAGED_BY_NIX=1
     export OMNIGENT_NO_UPDATE_CHECK=1
-    # Authentication can never be switched off from the environment file.
     export OMNIGENT_AUTH_ENABLED=1
     unset OMNIGENT_LOCAL_SINGLE_USER
     ${
@@ -254,9 +331,28 @@ in
       default = null;
       example = "/run/secrets/omnigent.env";
       description = ''
-        File read by systemd at start (`EnvironmentFile=`) holding secrets: OIDC
-        client secret, cookie secret, provider credentials. Its contents never
-        enter the Nix store.
+        File of `KEY=VALUE` lines holding secrets (OIDC client secret, cookie
+        secret, provider credentials). It is loaded as a systemd credential
+        (`LoadCredential=`, opened by PID 1), never as an `EnvironmentFile=`,
+        and parsed (not sourced) by the unprivileged start wrapper, which accepts
+        only an allowlist: `OMNIGENT_OIDC_*`, `OMNIGENT_GITHUB_APP_*`,
+        `OMNIGENT_CREDENTIAL_*`, `OMNIGENT_ACCOUNTS_COOKIE_SECRET`,
+        `OMNIGENT_ARTIFACT_URI`, `AWS_*` S3 credentials and anything in
+        {option}`environmentFileKeys`. Any other key stops the service from
+        starting. The file must live outside the Nix store on a root-owned,
+        not group/world-writable directory chain; a root-run guard enforces that
+        before start.
+      '';
+    };
+
+    environmentFileKeys = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "OMNIGENT_SOME_FLAG" ];
+      description = ''
+        Extra variable names accepted from {option}`environmentFile`. Module-
+        controlled names and process-injection prefixes (`LD_`, `BASH`,
+        `PYTHON`, `SYSTEMD`, `PATH`, …) are rejected.
       '';
     };
 
@@ -338,6 +434,10 @@ in
         message = "services.omnigent.environmentFile must be a runtime path outside the Nix store (secrets would be world-readable).";
       }
       {
+        assertion = badExtraKeys == [ ];
+        message = "services.omnigent.environmentFileKeys contains invalid or forbidden names: ${lib.concatStringsSep ", " badExtraKeys}.";
+      }
+      {
         assertion = !hasUriFile || !inStore cfg.database.uriFile;
         message = "services.omnigent.database.uriFile must be a runtime path outside the Nix store (secrets would be world-readable).";
       }
@@ -353,7 +453,9 @@ in
       inherit (cfg) environment;
 
       serviceConfig = {
-        ExecStartPre = lib.optional (guardedFiles != [ ]) "+${guard} ${lib.escapeShellArgs guardedFiles}";
+        ExecStartPre = lib.optional (
+          guardedFiles != [ ]
+        ) "+${pkgs.coreutils}/bin/env -i ${guard} ${lib.escapeShellArgs guardedFiles}";
         ExecStart = start;
         Restart = "on-failure";
         RestartSec = "5s";
@@ -367,8 +469,9 @@ in
         User = lib.mkIf (cfg.user != null) cfg.user;
         Group = lib.mkIf (cfg.group != null) cfg.group;
 
-        LoadCredential = lib.optional hasUriFile "database-uri:${toString cfg.database.uriFile}";
-        EnvironmentFile = lib.optional (cfg.environmentFile != null) (toString cfg.environmentFile);
+        LoadCredential =
+          lib.optional hasUriFile "database-uri:${toString cfg.database.uriFile}"
+          ++ lib.optional (cfg.environmentFile != null) "environment:${toString cfg.environmentFile}";
 
         # The server is a coordinator: it must never execute agent work or see
         # user files. (Hosts do that, elsewhere.)

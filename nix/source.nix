@@ -27,9 +27,35 @@ rec {
     wheelSha256 = "d0f85008b89655c2bb18d797d2fa3f96f2ed80f4a3b43b0e8138c6646581e5f6";
   };
 
-  # nixpkgs-unstable ships mcp 2.x; omnigent needs the 1.x API it locks.
-  mcp = {
-    version = "1.30.0";
-    sha256 = "445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4";
+  # ABI-sensitive Python dependencies pinned to upstream v0.21.0's uv.lock
+  # (sdist sha256). nixpkgs-unstable is newer than upstream's constraints for
+  # these (openai <2.45, mcp <2, websockets <15, certifi >=2026.10.19), so they
+  # are built from the locked releases instead of relaxing the constraints.
+  pythonPins = {
+    openai = {
+      version = "2.41.0";
+      sdistName = "openai";
+      sha256 = "db5c362acd6604b84f076abbefa66826ea4b46ecba2954ed866e6a149a1352c0";
+    };
+    openai-agents = {
+      version = "0.13.6";
+      sdistName = "openai_agents";
+      sha256 = "de7b3add7933ae704a5ee6e531f650d8aabb3ebaa1631f458ba39684a5ed966e";
+    };
+    mcp = {
+      version = "1.30.0";
+      sdistName = "mcp";
+      sha256 = "445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4";
+    };
+    websockets = {
+      version = "14.2";
+      sdistName = "websockets";
+      sha256 = "5059ed9c54945efb321f097084b4c7e52c246f2c869815876a69d1efc4ad6eb5";
+    };
+    certifi = {
+      version = "2026.10.19";
+      sdistName = "certifi";
+      sha256 = "035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae";
+    };
   };
 }
