@@ -34,7 +34,7 @@ checks.<system>.*  formatter.<system>
 
 Systems: `x86_64-linux` (built and tested), `aarch64-linux`, `aarch64-darwin`,
 `x86_64-darwin` (evaluate; not built). The desktop and the runner image are
-Linux-only for now.
+Linux-only **by design**: there is no `omnigent-desktop` package on darwin (no mac bundle is built), and `programs.omnigent.desktop.enable` on darwin fails with an explicit assertion. Use the browser UI there.
 
 ## Server (NixOS)
 
@@ -69,6 +69,8 @@ What the core module does and does not do:
 * Runs `omnigent-server` (upstream's external-runners-only entrypoint) as a
   hardened `DynamicUser` unit with `StateDirectory`. The server never executes
   agent work; do not register the server machine as a host.
+* Module-controlled variables (host, port, database, auth, config path, update switches) are rejected in `environment`, and the start wrapper re-exports them after systemd reads `environmentFile`, so neither can weaken validation. Authentication cannot be turned off from the environment.
+* `environmentFile` and `database.uriFile` must be runtime paths outside the Nix store; a literal `database.uri` containing a password is rejected.
 * Binds loopback. A non-loopback `listen.address` fails evaluation unless
   `auth.provider` is set explicitly.
 * Exactly one database source is required: `database.uriFile` (preferred, a
@@ -191,7 +193,7 @@ is not set up yet.
 * Other nixpkgs versions are also outside upstream's tested set (for example
   `claude-agent-sdk`, `openai-agents`); the runtime dependency check passes with
   those pins relaxed (see `pythonRelaxDeps` in `nix/omnigent.nix`).
-* The desktop is Linux-only here; a macOS app bundle is not packaged.
+* The desktop is intentionally Linux-only; no macOS bundle is built or planned here.
 * `omnigent-runner-image` and the `withKubernetes` variant
   (`omnigent.override { withKubernetes = true; }`) are provided but have no
   automated cluster test; the flake creates no cluster resources.

@@ -21,10 +21,14 @@ let
   };
   enabledHarnesses = lib.filterAttrs (_: h: h.enable) cfg.host.harnesses;
 
-  hostPackage = cfg.host.package.override {
-    harnessPackages = lib.mapAttrsToList (name: _: harnessPackage.${name}) enabledHarnesses;
-    extraPackages = cfg.host.extraPackages;
-  };
+  hostPackage =
+    if cfg.host.package ? override then
+      cfg.host.package.override {
+        harnessPackages = lib.mapAttrsToList (name: _: harnessPackage.${name}) enabledHarnesses;
+        extraPackages = cfg.host.extraPackages;
+      }
+    else
+      cfg.host.package;
 
   hostArgs = [
     "host"
@@ -132,7 +136,7 @@ in
       assertions = [
         {
           assertion = cfg.desktop.package != null;
-          message = "programs.omnigent.desktop: no desktop package is available for ${system}; set programs.omnigent.desktop.package.";
+          message = "programs.omnigent.desktop: the Omnigent desktop package is intentionally Linux-only in this flake (no package for ${system}). Use the browser UI, or set programs.omnigent.desktop.package yourself.";
         }
       ];
       home.packages = lib.optional (cfg.desktop.package != null) cfg.desktop.package;

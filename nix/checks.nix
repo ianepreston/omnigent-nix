@@ -154,6 +154,66 @@ let
       };
     });
 
+    refuses-reserved-environment = mustFail "reserved-environment" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.sqlite.enable = true;
+        environment.HOST = "0.0.0.0";
+      };
+    });
+    refuses-auth-disable-via-environment = mustFail "auth-disable-via-environment" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.sqlite.enable = true;
+        environment.OMNIGENT_AUTH_ENABLED = "0";
+      };
+    });
+    refuses-store-environment-file = mustFail "store-environment-file" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.sqlite.enable = true;
+        environmentFile = pkgs.writeText "leaky.env" "SECRET=1";
+      };
+    });
+    refuses-store-uri-file = mustFail "store-uri-file" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uriFile = pkgs.writeText "uri" ("postgresql://" + "u:p" + "@h/db");
+      };
+    });
+    refuses-store-path-string-uri-file = mustFail "store-path-string-uri-file" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uriFile = "${pkgs.hello}/uri";
+      };
+    });
+    refuses-password-uri = mustFail "password-uri" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = ("postgresql+psycopg://" + "omnigent:hunter2" + "@db.example.net/omnigent");
+      };
+    });
+    refuses-password-query-uri = mustFail "password-query-uri" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = ("postgresql+psycopg://" + "omnigent@db.example.net/omnigent?" + "password=hunter2");
+      };
+    });
+
+    # The start wrapper exports the controlled settings last, so the runtime
+    # secrets file cannot override them.
+    start-wrapper-forces-settings = pkgs.runCommand "start-wrapper-forces-settings" { } ''
+      w=${(svc uriFileServer).serviceConfig.ExecStart}
+      grep -q 'export HOST=127.0.0.1' $w
+      grep -q 'export OMNIGENT_AUTH_ENABLED=1' $w
+      grep -q 'unset OMNIGENT_LOCAL_SINGLE_USER' $w
+      grep -q 'export OMNIGENT_MANAGED_BY_NIX=1' $w
+      grep -q 'CREDENTIALS_DIRECTORY/database-uri' $w
+      # forced exports come before the exec, i.e. after systemd read the env file
+      test "$(grep -n 'export HOST' $w | cut -d: -f1)" -lt "$(grep -n '^exec ' $w | cut -d: -f1)"
+      touch $out
+    '';
+
     # Secrets never reach the unit: the URI file is a credential, the secrets
     # file an EnvironmentFile, and there is no DATABASE_URL in Environment=.
     secrets-stay-out-of-unit =
@@ -165,7 +225,7 @@ let
         && u.serviceConfig.LoadCredential == [ "database-uri:/run/secrets/omnigent-database-uri" ]
         && u.serviceConfig.EnvironmentFile == [ "/run/secrets/omnigent.env" ]
         && u.serviceConfig.DynamicUser
-        && u.environment.HOST == "127.0.0.1"
+        && !(u.environment ? HOST)
       ) "unit leaks a secret or loses its hardening/loopback default";
 
     # The core module owns no proxy or database service.
@@ -180,7 +240,35 @@ let
     ) "adapters did not produce the expected Caddy vhost / database / fixed user";
   };
 
+  hmDarwinDesktop = home-manager.lib.homeManagerConfiguration {
+    pkgs = import nixpkgs { system = "aarch64-darwin"; };
+    modules = [
+      self.homeManagerModules.omnigent
+      (_: {
+        home.username = "tester";
+        home.homeDirectory = "/Users/tester";
+        home.stateVersion = "26.05";
+        programs.omnigent.desktop.enable = true;
+      })
+    ];
+  };
+
   hmChecks = {
+    # Desktop is intentionally Linux-only: enabling it on darwin is a clear,
+    # explained assertion, not an obscure evaluation failure.
+    hm-desktop-darwin-explained =
+      let
+        r = builtins.tryEval (builtins.seq hmDarwinDesktop.activationPackage.drvPath true);
+      in
+      pkgs.runCommand "hm-desktop-darwin-explained" { } (
+        if r.success then
+          "echo 'darwin desktop.enable evaluated' >&2; exit 1"
+        else
+          ''
+            grep -q 'intentionally Linux-only' ${../modules/home-manager/omnigent.nix}
+            touch $out
+          ''
+      );
     hm-module-host = evalOnly "hm-module-host" hmHost.activationPackage;
     hm-module-idle = evalOnly "hm-module-idle" hmIdle.activationPackage;
     refuses-autostart-without-url = mustFailHm;
@@ -327,6 +415,26 @@ let
 
   desktopChecks = lib.optionalAttrs isLinux {
     pkg-omnigent-desktop = p.omnigent-desktop;
+
+    desktop-headless-launch =
+      pkgs.runCommand "omnigent-desktop-headless-launch"
+        {
+          nativeBuildInputs = [
+            pkgs.xvfb-run
+            pkgs.coreutils
+          ];
+        }
+        ''
+          export HOME=$TMPDIR XDG_CONFIG_HOME=$TMPDIR/.config
+          # Still running at the timeout (124) means the main process started
+          # and did not crash; any other status is a failure.
+          rc=0
+          timeout 20 xvfb-run -a ${p.omnigent-desktop}/bin/omnigent-desktop \
+            --no-sandbox --disable-gpu > launch.log 2>&1 || rc=$?
+          if [ "$rc" != 124 ]; then cat launch.log; echo "exit $rc" >&2; exit 1; fi
+          ! grep -qi 'cannot find module\|uncaught exception' launch.log
+          touch $out
+        '';
 
     desktop-nix-integration =
       pkgs.runCommand "omnigent-desktop-integration"

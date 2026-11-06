@@ -25,21 +25,71 @@ let
 
   hasUri = cfg.database.uri != null;
   hasUriFile = cfg.database.uriFile != null;
-  # `scheme://user:password@host/...`
-  uriHasPassword = hasUri && builtins.match ".*://[^/@:]+:[^/@]+@.*" cfg.database.uri != null;
+  # A password in the userinfo (`scheme://user:password@host`) or in a query
+  # parameter (`?password=...`, `sslpassword=`), case-insensitively.
+  uriLower = lib.toLower (toString cfg.database.uri);
+  uriHasPassword =
+    hasUri
+    && (
+      builtins.match ".*://[^/@:]+:[^/@]+@.*" uriLower != null
+      || builtins.match ".*[?&][a-z_]*password=.*" uriLower != null
+    );
   databaseSources = lib.count (x: x) [
     hasUri
     hasUriFile
     cfg.database.sqlite.enable
   ];
 
+  # Names the module controls. They are rejected in `environment` and re-forced
+  # by the start wrapper after systemd has read `environmentFile`, so neither a
+  # caller nor a runtime secrets file can weaken the validated configuration.
+  reservedEnv = [
+    "HOST"
+    "PORT"
+    "ARTIFACT_DIR"
+    "HOME"
+    "DATABASE_URL"
+    "OMNIGENT_CONFIG"
+    "OMNIGENT_MANAGED_BY_NIX"
+    "OMNIGENT_NO_UPDATE_CHECK"
+    "OMNIGENT_AUTH_PROVIDER"
+    "OMNIGENT_AUTH_ENABLED"
+    "OMNIGENT_LOCAL_SINGLE_USER"
+    "OMNIGENT_ACCOUNTS_BASE_URL"
+  ];
+  badEnv = lib.filter (n: lib.elem n reservedEnv) (lib.attrNames cfg.environment);
+
+  inStore = path: lib.hasPrefix "${builtins.storeDir}/" (toString path);
+
   bracketed =
     if lib.hasInfix ":" cfg.listen.address then "[${cfg.listen.address}]" else cfg.listen.address;
 
+  q = lib.escapeShellArg;
+
   # Reads secrets from systemd credentials at start so nothing secret is ever
-  # a Nix value, a unit `Environment=` line, or a store path.
+  # a Nix value, a unit `Environment=` line, or a store path. Security-relevant
+  # settings are exported here, last, so `environmentFile` cannot override them.
   start = pkgs.writeShellScript "omnigent-server-start" ''
     set -eu
+    export HOST=${q cfg.listen.address}
+    export PORT=${q (toString cfg.listen.port)}
+    export ARTIFACT_DIR=${q "${cfg.stateDir}/artifacts"}
+    export HOME=${q cfg.stateDir}
+    export OMNIGENT_CONFIG=${q "${settingsFile}"}
+    export OMNIGENT_MANAGED_BY_NIX=1
+    export OMNIGENT_NO_UPDATE_CHECK=1
+    # Authentication can never be switched off from the environment file.
+    export OMNIGENT_AUTH_ENABLED=1
+    unset OMNIGENT_LOCAL_SINGLE_USER
+    ${
+      if cfg.auth.provider != null then
+        "export OMNIGENT_AUTH_PROVIDER=${q cfg.auth.provider}"
+      else
+        "unset OMNIGENT_AUTH_PROVIDER"
+    }
+    ${lib.optionalString (cfg.publicUrl != null) "export OMNIGENT_ACCOUNTS_BASE_URL=${q cfg.publicUrl}"}
+    ${lib.optionalString hasUri "export DATABASE_URL=${q cfg.database.uri}"}
+    ${lib.optionalString cfg.database.sqlite.enable "export DATABASE_URL=${q "sqlite:///${cfg.stateDir}/omnigent.db"}"}
     ${lib.optionalString hasUriFile ''
       DATABASE_URL="$(< "$CREDENTIALS_DIRECTORY/database-uri")"
       export DATABASE_URL
@@ -140,11 +190,16 @@ in
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
-      description = "Extra non-secret environment variables for the service.";
+      description = ''
+        Extra non-secret environment variables for the service. Names the module
+        controls (host, port, database, authentication, config path, update
+        switches) are rejected here and cannot be overridden by
+        {option}`environmentFile` either.
+      '';
     };
 
     environmentFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.externalPath;
       default = null;
       example = "/run/secrets/omnigent.env";
       description = ''
@@ -174,7 +229,7 @@ in
 
     database = {
       uriFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
+        type = lib.types.nullOr lib.types.externalPath;
         default = null;
         example = "/run/secrets/omnigent-database-uri";
         description = ''
@@ -186,8 +241,9 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = ''
-          Literal database URI. Discouraged: it becomes a store path. Only for a
-          URI that carries no secret (for example a peer-authenticated socket).
+          Literal database URI. It lands in the store and the unit, so a URI
+          that carries a password is rejected: use {option}`uriFile`. Only for a
+          URI without a secret (for example a peer-authenticated socket).
         '';
       };
       sqlite.enable = lib.mkEnableOption ''
@@ -218,12 +274,23 @@ in
         assertion = cfg.user != null || cfg.group == null;
         message = "services.omnigent.group is only meaningful together with services.omnigent.user.";
       }
+      {
+        assertion = !uriHasPassword;
+        message = "services.omnigent.database.uri contains a password, which would be copied into the Nix store; use database.uriFile.";
+      }
+      {
+        assertion = badEnv == [ ];
+        message = "services.omnigent.environment may not set module-controlled variables: ${lib.concatStringsSep ", " badEnv}.";
+      }
+      {
+        assertion = cfg.environmentFile == null || !inStore cfg.environmentFile;
+        message = "services.omnigent.environmentFile must be a runtime path outside the Nix store (secrets would be world-readable).";
+      }
+      {
+        assertion = !hasUriFile || !inStore cfg.database.uriFile;
+        message = "services.omnigent.database.uriFile must be a runtime path outside the Nix store (secrets would be world-readable).";
+      }
     ];
-
-    warnings = lib.optional (hasUri && uriHasPassword) ''
-      services.omnigent.database.uri is a Nix value and will be world-readable in
-      the store. Use database.uriFile unless the URI contains no secret.
-    '';
 
     systemd.services.omnigent = {
       description = "Omnigent server";
@@ -231,22 +298,8 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
-      environment = {
-        HOST = cfg.listen.address;
-        PORT = toString cfg.listen.port;
-        ARTIFACT_DIR = "${cfg.stateDir}/artifacts";
-        OMNIGENT_CONFIG = "${settingsFile}";
-        OMNIGENT_MANAGED_BY_NIX = "1";
-        OMNIGENT_NO_UPDATE_CHECK = "1";
-        HOME = cfg.stateDir;
-      }
-      // lib.optionalAttrs (cfg.auth.provider != null) { OMNIGENT_AUTH_PROVIDER = cfg.auth.provider; }
-      // lib.optionalAttrs (cfg.publicUrl != null) { OMNIGENT_ACCOUNTS_BASE_URL = cfg.publicUrl; }
-      // lib.optionalAttrs hasUri { DATABASE_URL = cfg.database.uri; }
-      // lib.optionalAttrs cfg.database.sqlite.enable {
-        DATABASE_URL = "sqlite:///${cfg.stateDir}/omnigent.db";
-      }
-      // cfg.environment;
+      # Module-controlled values are exported by the start wrapper instead.
+      inherit (cfg) environment;
 
       serviceConfig = {
         ExecStart = start;

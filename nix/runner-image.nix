@@ -38,6 +38,11 @@ dockerTools.buildLayeredImage {
     mkdir -p tmp home/runner workspace
     chmod 1777 tmp
   '';
+  # The image runs as 65532:65532; its home and workspace must be writable by it.
+  fakeRootCommands = ''
+    chown 65532:65532 home/runner workspace
+  '';
+  enableFakechroot = true;
   config = {
     Entrypoint = [ "${omnigent-host}/bin/omnigent" ];
     Cmd = [ "--help" ];
