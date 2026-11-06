@@ -1,0 +1,50 @@
+diff --git a/omnigent/cli.py b/omnigent/cli.py
+index f55cf4c..ad3b284 100644
+--- a/omnigent/cli.py
++++ b/omnigent/cli.py
+@@ -6191,6 +6191,15 @@ def upgrade(
+     :param dry_run: Print the command and exit without running it.
+     :returns: None.
+     """
++    import os as _nix_os
++
++    if _nix_os.environ.get("OMNIGENT_MANAGED_BY_NIX"):
++        raise click.ClickException(
++            "This Omnigent install is managed by Nix and cannot upgrade itself. "
++            "Update the omnigent-nix flake input (`nix flake update omnigent`) "
++            "and rebuild or reactivate instead."
++        )
++
+     import importlib.metadata
+ 
+     from omnigent.update_check import (
+diff --git a/setup.py b/setup.py
+index c77814d..be518e7 100644
+--- a/setup.py
++++ b/setup.py
+@@ -16,6 +16,7 @@ wheel alongside the rest of the package.
+ 
+ from __future__ import annotations
+ 
++import os
+ import subprocess
+ import time
+ from pathlib import Path
+@@ -249,7 +250,7 @@ class _GenerateBuildInfo(build_py):
+         """
+         # Keep generated names and types aligned with omnigent/_build_info.pyi.
+         target = Path(__file__).resolve().parent / "omnigent" / "_build_info.py"
+-        commit = _git_sha()
++        commit = os.environ.get("OMNIGENT_BUILD_COMMIT_SHA") or _git_sha()
+         # Use repr() for the SHA so quoting is always correct, even
+         # for an empty fallback. The format is deliberately minimal
+         # — anything more elaborate (version strings, branch names)
+@@ -264,7 +265,7 @@ class _GenerateBuildInfo(build_py):
+             "not have it on disk.\n"
+             '"""\n'
+             "from __future__ import annotations\n\n"
+-            f"BUILD_TIME_EPOCH: int = {int(time.time())}\n"
++            f"BUILD_TIME_EPOCH: int = {int(os.environ.get('SOURCE_DATE_EPOCH') or time.time())}\n"
+             f"COMMIT_SHA: str = {commit!r}\n"
+         )
+ 

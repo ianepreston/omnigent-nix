@@ -1,0 +1,31 @@
+diff --git a/web/electron/src/main.js b/web/electron/src/main.js
+index 464d590..9a1546f 100644
+--- a/web/electron/src/main.js
++++ b/web/electron/src/main.js
+@@ -1658,7 +1658,8 @@ const updater = createDesktopUpdater({
+   // this to !app.isPackaged — not an env var — ensures a packaged app can
+   // never be redirected to a repository-local update configuration.
+   forceDevUpdateConfig: !app.isPackaged,
+-  updatesEnabled: !app.isPackaged || !isDevBuild,
++  // Nix build: the flake lock is authoritative, never self-update.
++  updatesEnabled: false,
+ });
+ 
+ // Shell-owned About window: available from the native application menu even
+diff --git a/web/electron/src/omnigent_cli.js b/web/electron/src/omnigent_cli.js
+index 78c0cb0..8c969f4 100644
+--- a/web/electron/src/omnigent_cli.js
++++ b/web/electron/src/omnigent_cli.js
+@@ -370,6 +370,12 @@ function resolveCliPath(configuredPath, deps = {}) {
+   if (configuredPath && isExec(configuredPath)) {
+     return { path: configuredPath, source: "configured" };
+   }
++  // Nix build: prefer the co-built CLI over anything on PATH. This also works
++  // when the app starts from a Dock or desktop launcher with a minimal PATH.
++  const nixCli = process.env.OMNIGENT_NIX_CLI;
++  if (nixCli && isExec(nixCli)) {
++    return { path: nixCli, source: "nix" };
++  }
+   const onPath = which();
+   if (onPath && isExec(onPath)) {
+     return { path: onPath, source: "path" };
