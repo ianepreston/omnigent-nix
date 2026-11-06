@@ -12,7 +12,36 @@
   withKubernetes ? false,
 }:
 let
-  py = python3.pkgs;
+  # nixpkgs-unstable's openai-agents declares `openai>=3` and `websockets`
+  # extras that its own set does not satisfy, so it fails nixpkgs' runtime-deps
+  # check. That inconsistency is inside nixpkgs; skip the check for that one
+  # package and prove it works with `pythonImportsCheck = [ "agents" ]` below.
+  python = python3.override {
+    self = python;
+    packageOverrides = _: prev: {
+      # nixpkgs-unstable ships mcp 2.x, which dropped APIs omnigent imports
+      # (`streamablehttp_client`). Use the 1.x release upstream locks.
+      mcp = prev.mcp.overridePythonAttrs (o: {
+        inherit (upstream.mcp) version;
+        src = prev.fetchPypi {
+          pname = "mcp";
+          inherit (upstream.mcp) version;
+          sha256 = upstream.mcp.sha256;
+        };
+        patches = [ ];
+        # 2.x split types into a separate package that 1.x does not have.
+        dependencies = lib.filter (d: (d.pname or "") != "mcp-types") (o.dependencies or [ ]) ++ [
+          prev.httpx-sse
+          prev.pydantic-settings
+        ];
+        doCheck = false;
+      });
+      openai-agents = prev.openai-agents.overridePythonAttrs (o: {
+        dontCheckRuntimeDeps = true;
+      });
+    };
+  };
+  py = python.pkgs;
 
   # Not in nixpkgs. Pure Python; requires google-re2 (in nixpkgs), lark,
   # jmespath, pendulum, pyyaml. Installed from the pinned upstream wheel.
@@ -74,7 +103,7 @@ let
     doCheck = false;
   };
   omnigent-lib = py.buildPythonPackage {
-    pname = "omnigent-lib";
+    pname = "omnigent";
     inherit (upstream) version src;
     pyproject = true;
 
@@ -145,30 +174,30 @@ let
         omnigent-ui-sdk
       ];
 
-    # The wheel pins `websockets<15` (a macOS-client regression upstream); the
-    # Linux asyncio client and uvicorn's server side are unaffected by it.
-    # Pins that nixpkgs overshoots are relaxed rather than shipping a second copy.
+    # Pins nixpkgs-unstable overshoots (checked against v0.21.0's constraints):
+    #   openai     2.53 vs <2.45  (upstream lock 2.41)
+    #   websockets 17   vs <15    (upstream lock 14.2; macOS client hang, Linux unaffected)
+    #   certifi    2026.7.22 vs >=2026.10.19 (CA bundle floor)
+    # Everything else, including the former 26.05 pins, is satisfied unrelaxed.
     pythonRelaxDeps = [
-      "websockets"
-      "starlette"
-      "keyring"
-      "protobuf"
-      "pillow"
-      "certifi"
       "openai"
-      "claude-agent-sdk"
-      "openai-agents"
-      "mcp"
-      "click"
+      "websockets"
+      "certifi"
     ];
 
     # The package's own pytest suite needs network, harness CLIs and a database;
-    # behaviour is covered by `checks.*` (CLI, import, `-I`, server smoke).
+    # behaviour is covered by `checks.*`.
     doCheck = false;
 
     pythonImportsCheck = [
+      "agents"
+      "mcp"
+      "websockets"
       "omnigent"
       "omnigent.cli"
+      "omnigent.server.app"
+      "omnigent.host.mcp_tools"
+      "omnigent.host.connect"
       "omnigent_client"
       "omnigent_ui_sdk"
     ];
@@ -190,7 +219,7 @@ let
   # the daemons, `sys.executable -I` git helpers). A site-patched script wrapper
   # only fixes the first process, so run everything on one `withPackages`
   # interpreter instead.
-  pythonEnv = python3.withPackages (_: [ omnigent-lib ]);
+  pythonEnv = python.withPackages (_: [ omnigent-lib ]);
 in
 callPackage ./launchers.nix { } {
   pname = "omnigent";

@@ -26,4 +26,10 @@ rec {
     # sha256 of the py3-none-any wheel, from upstream's uv.lock.
     wheelSha256 = "d0f85008b89655c2bb18d797d2fa3f96f2ed80f4a3b43b0e8138c6646581e5f6";
   };
+
+  # nixpkgs-unstable ships mcp 2.x; omnigent needs the 1.x API it locks.
+  mcp = {
+    version = "1.30.0";
+    sha256 = "445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4";
+  };
 }

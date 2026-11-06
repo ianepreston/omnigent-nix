@@ -214,6 +214,89 @@ let
       touch $out
     '';
 
+    refuses-empty-user-password-uri = mustFail "empty-user-password-uri" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = "postgresql+psycopg://" + ":pw" + "@host/db";
+      };
+    });
+    refuses-encoded-password-key-uri = mustFail "encoded-password-key-uri" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = "postgresql+psycopg://u@host/db?" + "pass%77ord=x";
+      };
+    });
+    refuses-encoded-sslpassword-key-uri = mustFail "encoded-sslpassword-key-uri" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = "postgresql+psycopg://u@host/db?" + "sslpass%77ord=x";
+      };
+    });
+    refuses-unlisted-query-key-uri = mustFail "unlisted-query-key-uri" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.uri = "postgresql+psycopg://u@host/db?passfile=/x";
+      };
+    });
+    refuses-exact-store-dir-env-file = mustFail "exact-store-dir-env-file" (nixos {
+      services.omnigent = {
+        enable = true;
+        database.sqlite.enable = true;
+        environmentFile = builtins.storeDir;
+      };
+    });
+    passwordless-uri-accepted =
+      evalOnly "passwordless-uri-accepted"
+        (nixos {
+          services.omnigent = {
+            enable = true;
+            database.uri = "postgresql+psycopg://omnigent@/omnigent?host=/run/postgresql";
+          };
+        }).config.system.build.toplevel;
+
+    # Every reserved variable is forced or unset by the wrapper, so the secrets
+    # file cannot supply any of them (including OMNIGENT_ACCOUNTS_BASE_URL when
+    # publicUrl is null).
+    wrapper-covers-every-reserved-variable =
+      pkgs.runCommand "wrapper-covers-every-reserved-variable" { }
+        ''
+          w=${(svc sqliteLoopback).serviceConfig.ExecStart}
+          for v in HOST PORT ARTIFACT_DIR HOME DATABASE_URL OMNIGENT_CONFIG OMNIGENT_MANAGED_BY_NIX \
+                   OMNIGENT_NO_UPDATE_CHECK OMNIGENT_AUTH_PROVIDER OMNIGENT_AUTH_ENABLED \
+                   OMNIGENT_LOCAL_SINGLE_USER OMNIGENT_ACCOUNTS_BASE_URL; do
+            grep -Eq "^(export $v=|unset $v$)" $w || { echo "$v not forced/unset" >&2; exit 1; }
+          done
+          touch $out
+        '';
+
+    # Runtime guard: a secrets path that is a symlink into the store is refused.
+    secret-path-guard =
+      let
+        cmd = (svc uriFileServer).serviceConfig.ExecStartPre;
+        guardBin = lib.removePrefix "+" (builtins.head (lib.splitString " " (builtins.head cmd)));
+      in
+      pkgs.runCommand "secret-path-guard" { } ''
+        echo secret > plain
+        ln -s ${pkgs.hello}/bin/hello via-store
+        ln -s ${builtins.storeDir} exact-store
+        ${guardBin} plain
+        ! ${guardBin} via-store 2>/dev/null
+        ! ${guardBin} exact-store 2>/dev/null
+        ! ${guardBin} missing-file 2>/dev/null
+        touch $out
+      '';
+    guard-wired-into-unit = assertEval "guard-wired-into-unit" (
+      lib.hasPrefix "+" (builtins.head (svc uriFileServer).serviceConfig.ExecStartPre)
+      && lib.hasInfix "/run/secrets/omnigent.env" (
+        builtins.head (svc uriFileServer).serviceConfig.ExecStartPre
+      )
+      && lib.hasInfix "/run/secrets/omnigent-database-uri" (
+        builtins.head (svc uriFileServer).serviceConfig.ExecStartPre
+      )
+    ) "secret path guard is not wired into ExecStartPre with both files";
+
+    hm-host-package-without-override-refused = mustFailHmNoOverride;
+
     # Secrets never reach the unit: the URI file is a credential, the secrets
     # file an EnvironmentFile, and there is no DATABASE_URL in Environment=.
     secrets-stay-out-of-unit =
@@ -240,37 +323,49 @@ let
     ) "adapters did not produce the expected Caddy vhost / database / fixed user";
   };
 
-  hmDarwinDesktop = home-manager.lib.homeManagerConfiguration {
-    pkgs = import nixpkgs { system = "aarch64-darwin"; };
+  # Evaluate the module with stub options so the failed assertion's actual
+  # message can be read (homeManagerConfiguration throws instead).
+  hmDarwinDesktop = lib.evalModules {
     modules = [
       self.homeManagerModules.omnigent
-      (_: {
-        home.username = "tester";
-        home.homeDirectory = "/Users/tester";
-        home.stateVersion = "26.05";
-        programs.omnigent.desktop.enable = true;
-      })
+      (
+        { lib, ... }:
+        {
+          options = {
+            assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; };
+            home.packages = lib.mkOption {
+              type = lib.types.listOf lib.types.raw;
+              default = [ ];
+            };
+            systemd.user.services = lib.mkOption {
+              type = lib.types.attrsOf lib.types.raw;
+              default = { };
+            };
+            launchd.agents = lib.mkOption {
+              type = lib.types.attrsOf lib.types.raw;
+              default = { };
+            };
+          };
+          config = {
+            _module.args.pkgs = import nixpkgs { system = "aarch64-darwin"; };
+            programs.omnigent.desktop.enable = true;
+          };
+        }
+      )
     ];
   };
 
   hmChecks = {
     # Desktop is intentionally Linux-only: enabling it on darwin is a clear,
     # explained assertion, not an obscure evaluation failure.
-    hm-desktop-darwin-explained =
-      let
-        r = builtins.tryEval (builtins.seq hmDarwinDesktop.activationPackage.drvPath true);
-      in
-      pkgs.runCommand "hm-desktop-darwin-explained" { } (
-        if r.success then
-          "echo 'darwin desktop.enable evaluated' >&2; exit 1"
-        else
-          ''
-            grep -q 'intentionally Linux-only' ${../modules/home-manager/omnigent.nix}
-            touch $out
-          ''
-      );
-    hm-module-host = evalOnly "hm-module-host" hmHost.activationPackage;
-    hm-module-idle = evalOnly "hm-module-idle" hmIdle.activationPackage;
+    hm-desktop-darwin-explained = assertEval "hm-desktop-darwin-explained" (lib.any
+      (
+        a:
+        !a.assertion
+        && lib.hasInfix "this flake does not yet build a macOS desktop bundle; on macOS use the upstream app" a.message
+      )
+      hmDarwinDesktop.config.assertions
+    ) "darwin desktop.enable did not raise the macOS-bundle assertion";
     refuses-autostart-without-url = mustFailHm;
     # A host is never started merely because the package is installed.
     hm-host-not-started-by-default = assertEval "hm-host-not-started-by-default" (
@@ -282,6 +377,19 @@ let
       hmHost.config.systemd.user.services ? omnigent-host
     ) "autoStart did not define the user service";
   };
+  mustFailHmNoOverride =
+    let
+      cfg = hm {
+        programs.omnigent.host = {
+          enable = true;
+          package = pkgs.runCommand "plain-package" { } "mkdir -p $out/bin";
+        };
+      };
+      r = builtins.tryEval (builtins.seq cfg.activationPackage.drvPath true);
+    in
+    pkgs.runCommand "hm-host-package-without-override-refused" { } (
+      if r.success then "echo 'package without override accepted' >&2; exit 1" else "touch $out"
+    );
   mustFailHm =
     let
       cfg = hm {
@@ -448,7 +556,7 @@ let
           # The wrapper hands the app the co-built CLI and runs nixpkgs' Electron.
           grep -q 'OMNIGENT_NIX_CLI' ${p.omnigent-desktop}/bin/omnigent-desktop
           grep -q '${p.omnigent}/bin/omnigent' ${p.omnigent-desktop}/bin/omnigent-desktop
-          grep -q '${pkgs.electron}' ${p.omnigent-desktop}/bin/omnigent-desktop
+          grep -q '${p.omnigent-desktop.passthru.electron}' ${p.omnigent-desktop}/bin/omnigent-desktop
 
           # CLI discovery prefers the Nix CLI even with an empty PATH.
           cat > probe.js <<EOF

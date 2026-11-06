@@ -25,15 +25,38 @@ let
 
   hasUri = cfg.database.uri != null;
   hasUriFile = cfg.database.uriFile != null;
-  # A password in the userinfo (`scheme://user:password@host`) or in a query
-  # parameter (`?password=...`, `sslpassword=`), case-insensitively.
-  uriLower = lib.toLower (toString cfg.database.uri);
-  uriHasPassword =
-    hasUri
-    && (
-      builtins.match ".*://[^/@:]+:[^/@]+@.*" uriLower != null
-      || builtins.match ".*[?&][a-z_]*password=.*" uriLower != null
-    );
+  # A literal URI is accepted only in an explicitly passwordless form:
+  #   scheme://[user@][host[:port]][/dbname][?key=value&...]
+  # - userinfo is a bare username (no ':' and no '%', so no password component)
+  # - the host contains no '@', '%' or '/'
+  # - query keys come from a short allowlist and values are plain characters
+  #   (no '%'), so URL-encoded key names cannot smuggle a password parameter.
+  # Anything else must go through `database.uriFile`.
+  safeQueryKeys = [
+    "host"
+    "port"
+    "sslmode"
+    "sslrootcert"
+    "application_name"
+    "connect_timeout"
+  ];
+  uriParts =
+    if hasUri then
+      builtins.match "([a-z][a-z0-9+.-]*)://(([A-Za-z0-9_.-]+)@)?([]A-Za-z0-9_.:[-]*)(/[A-Za-z0-9_./-]*)?(\\?([^#]*))?" cfg.database.uri
+    else
+      null;
+  safeQuery =
+    q0:
+    q0 == null
+    || q0 == ""
+    || lib.all (
+      kv:
+      let
+        m = builtins.match "([a-z_]+)=([A-Za-z0-9_./:-]*)" kv;
+      in
+      m != null && lib.elem (builtins.head m) safeQueryKeys
+    ) (lib.splitString "&" q0);
+  uriIsSafe = hasUri && uriParts != null && safeQuery (builtins.elemAt uriParts 6);
   databaseSources = lib.count (x: x) [
     hasUri
     hasUriFile
@@ -59,7 +82,30 @@ let
   ];
   badEnv = lib.filter (n: lib.elem n reservedEnv) (lib.attrNames cfg.environment);
 
-  inStore = path: lib.hasPrefix "${builtins.storeDir}/" (toString path);
+  inStore =
+    path: toString path == builtins.storeDir || lib.hasPrefix "${builtins.storeDir}/" (toString path);
+
+  # Runtime counterpart of the lexical store-path assertions: a path such as
+  # /run/secrets/x may be a symlink into the store. Runs privileged (`+`)
+  # before the service starts and refuses if any secret file resolves there.
+  guard = pkgs.writeShellScript "omnigent-secret-path-guard" ''
+    set -eu
+    for f in "$@"; do
+      r=$(${pkgs.coreutils}/bin/realpath -e -- "$f") || {
+        echo "omnigent: cannot resolve secret file $f" >&2
+        exit 1
+      }
+      case "$r" in
+        ${builtins.storeDir}|${builtins.storeDir}/*)
+          echo "omnigent: secret file $f resolves into the Nix store ($r); refusing to start" >&2
+          exit 1
+          ;;
+      esac
+    done
+  '';
+  guardedFiles =
+    lib.optional (cfg.environmentFile != null) (toString cfg.environmentFile)
+    ++ lib.optional hasUriFile (toString cfg.database.uriFile);
 
   bracketed =
     if lib.hasInfix ":" cfg.listen.address then "[${cfg.listen.address}]" else cfg.listen.address;
@@ -87,7 +133,12 @@ let
       else
         "unset OMNIGENT_AUTH_PROVIDER"
     }
-    ${lib.optionalString (cfg.publicUrl != null) "export OMNIGENT_ACCOUNTS_BASE_URL=${q cfg.publicUrl}"}
+    ${
+      if cfg.publicUrl != null then
+        "export OMNIGENT_ACCOUNTS_BASE_URL=${q cfg.publicUrl}"
+      else
+        "unset OMNIGENT_ACCOUNTS_BASE_URL"
+    }
     ${lib.optionalString hasUri "export DATABASE_URL=${q cfg.database.uri}"}
     ${lib.optionalString cfg.database.sqlite.enable "export DATABASE_URL=${q "sqlite:///${cfg.stateDir}/omnigent.db"}"}
     ${lib.optionalString hasUriFile ''
@@ -275,8 +326,8 @@ in
         message = "services.omnigent.group is only meaningful together with services.omnigent.user.";
       }
       {
-        assertion = !uriHasPassword;
-        message = "services.omnigent.database.uri contains a password, which would be copied into the Nix store; use database.uriFile.";
+        assertion = !hasUri || uriIsSafe;
+        message = "services.omnigent.database.uri is only accepted in a passwordless form (scheme://[user@][host[:port]][/db][?host|port|sslmode|sslrootcert|application_name|connect_timeout=...]); anything else could carry a secret into the Nix store, use database.uriFile.";
       }
       {
         assertion = badEnv == [ ];
@@ -302,6 +353,7 @@ in
       inherit (cfg) environment;
 
       serviceConfig = {
+        ExecStartPre = lib.optional (guardedFiles != [ ]) "+${guard} ${lib.escapeShellArgs guardedFiles}";
         ExecStart = start;
         Restart = "on-failure";
         RestartSec = "5s";

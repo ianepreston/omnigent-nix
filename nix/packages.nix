@@ -34,6 +34,7 @@ in
 }
 // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
   omnigent-desktop = pkgs.callPackage ./desktop.nix {
+    electron = pkgs.electron_45;
     inherit
       omnigent
       upstream

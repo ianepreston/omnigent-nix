@@ -92,7 +92,7 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   passthru = {
-    inherit omnigent;
+    inherit omnigent electron;
   };
 
   meta = {

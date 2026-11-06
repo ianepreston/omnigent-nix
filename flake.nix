@@ -2,10 +2,10 @@
   description = "Omnigent (server, host, desktop) packaged for Nix, with NixOS and Home Manager modules";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # Used only by `checks` to evaluate the Home Manager module.
     home-manager = {
-      url = "github:nix-community/home-manager/release-26.05";
+      url = "github:nix-community/home-manager/master";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

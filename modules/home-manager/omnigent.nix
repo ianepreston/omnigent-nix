@@ -98,6 +98,11 @@ in
     (lib.mkIf cfg.host.enable {
       assertions = [
         {
+          assertion =
+            cfg.host.package ? override || (enabledHarnesses == { } && cfg.host.extraPackages == [ ]);
+          message = "programs.omnigent.host.package has no .override, so harnesses/extraPackages cannot be applied to it: disable the harnesses and drop extraPackages, or pass a package that already contains them.";
+        }
+        {
           assertion = !cfg.host.autoStart || cfg.host.serverUrl != null;
           message = "programs.omnigent.host.autoStart needs programs.omnigent.host.serverUrl.";
         }
@@ -136,7 +141,11 @@ in
       assertions = [
         {
           assertion = cfg.desktop.package != null;
-          message = "programs.omnigent.desktop: the Omnigent desktop package is intentionally Linux-only in this flake (no package for ${system}). Use the browser UI, or set programs.omnigent.desktop.package yourself.";
+          message =
+            if pkgs.stdenv.hostPlatform.isDarwin then
+              "programs.omnigent.desktop: this flake does not yet build a macOS desktop bundle; on macOS use the upstream app (or set programs.omnigent.desktop.package yourself)."
+            else
+              "programs.omnigent.desktop: this flake has no desktop package for ${system}; set programs.omnigent.desktop.package yourself.";
         }
       ];
       home.packages = lib.optional (cfg.desktop.package != null) cfg.desktop.package;
