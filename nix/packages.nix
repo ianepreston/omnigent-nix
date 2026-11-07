@@ -7,7 +7,11 @@ let
 
   upstream = pkgs.callPackage ./source.nix { };
 
+  # Pinned to upstream's pnpm so the fetch output is nixpkgs-independent.
+  pnpm = pkgs.pnpm_11.override { inherit (upstream.pnpm) version hash; };
+
   pnpmDeps = pkgs.fetchPnpmDeps {
+    inherit pnpm;
     pname = "omnigent-pnpm-deps";
     inherit (upstream) version src;
     pnpmWorkspaces = [
@@ -18,7 +22,7 @@ let
     hash = upstream.pnpmDepsHash;
   };
 
-  webAssets = pkgs.callPackage ./web-assets.nix { inherit upstream pnpmDeps; };
+  webAssets = pkgs.callPackage ./web-assets.nix { inherit upstream pnpmDeps pnpm; };
 
   omnigent = pkgs.callPackage ./omnigent.nix { inherit upstream webAssets; };
 
@@ -30,6 +34,9 @@ in
     omnigent-host
     ;
   omnigent-web-assets = webAssets;
+  # Exposed so CI can prove the fetch hash is independent of the consumer's nixpkgs.
+  omnigent-pnpm-deps = pnpmDeps;
+  omnigent-source = upstream.src;
   default = omnigent;
 }
 // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
@@ -47,6 +54,7 @@ in
       upstream
       webAssets
       pnpmDeps
+      pnpm
       ;
   };
   omnigent-runner-image = pkgs.callPackage ./runner-image.nix { inherit omnigent-host; };

@@ -181,7 +181,7 @@ npm-based installer. Run a host once by hand with
   The `bin/` entry points therefore run on a `python3.withPackages` interpreter
   that sees the whole closure itself, with no `PYTHONPATH` leaking into the
   subprocesses agents launch (`checks.*.child-interpreter`).
-* **Web UI.** `pnpm` (from nixpkgs) installs upstream's locked workspace
+* **Web UI.** `pnpm` — pinned to upstream's exact 11.15.1 from the npm registry, not nixpkgs' pnpm, so the dependency-store hash does not vary with the consumer's nixpkgs — installs upstream's locked workspace
   offline (`fetchPnpmDeps`); Vite builds the SPA, which is then bundled with
   `OMNIGENT_SKIP_WEB_UI=true` for the Python phase.
 * **Deterministic metadata.** `setup.py` is patched to use `SOURCE_DATE_EPOCH`
@@ -223,7 +223,14 @@ use a `path:` reference.
 2. `scripts/update-hashes.sh` regenerates the source and pnpm hashes.
 3. If the lockfile or `cel-python` pin changed upstream, update
    `celPython` in `nix/source.nix` from upstream's `uv.lock`.
-4. `nix flake check`.
+4. `scripts/check-hash-independence.sh <consumer-nixpkgs-rev>` re-fetches every
+   fixed-output derivation (source, pnpm dependency store, pinned sdists) with
+   `--rebuild` under this flake's nixpkgs and under the given revision, and fails
+   on any hash mismatch. Pass the revision your consumer locks, e.g.
+   `jq -r '.nodes["nixpkgs-unstable"].locked.rev' ../nixos/flake.lock`. (A plain
+   build is not a proof: Nix skips a fixed-output derivation whose output is
+   already in the store.)
+5. `nix flake check`.
 
 Release automation (new-tag detection, CI hash regeneration, a host-tunnel test)
 is not set up yet.

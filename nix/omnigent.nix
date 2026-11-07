@@ -226,6 +226,8 @@ callPackage ./launchers.nix { } {
       omnigent-lib
       pythonEnv
       ;
+    # Fixed-output sources of the pinned dependencies, for hash-independence checks.
+    pythonSources = lib.mapAttrs (n: _: py.${n}.src) upstream.pythonPins;
   };
   meta = {
     description = "Declarative agent authoring and runtime framework (server, CLI, host)";

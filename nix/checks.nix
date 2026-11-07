@@ -637,7 +637,7 @@ let
     web-ui-bundled = pkgs.runCommand "omnigent-web-ui-bundled" { } ''
       d=${p.omnigent.passthru.omnigent-lib}/${pkgs.python3.sitePackages}/omnigent/server/static/web-ui
       test -f $d/index.html
-      ls $d/assets | grep -q '\.js$'
+      ls $d/assets/*.js >/dev/null
       touch $out
     '';
 
@@ -714,7 +714,7 @@ let
           OMNIGENT_NIX_CLI=${p.omnigent}/bin/omnigent PATH= ${pkgs.nodejs_22}/bin/node probe.js
 
           # No installer fetched Electron or application code into the output.
-          ! find ${p.omnigent-desktop} -name 'electron-v*' | grep -q .
+          test -z "$(find ${p.omnigent-desktop} -name 'electron-v*')"
           touch $out
         '';
   };

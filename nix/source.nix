@@ -16,9 +16,18 @@ rec {
     hash = "sha256-qj1o4K3dQ0bA99ij9MILfb/SUqK+/11kRhLvZM30vuQ=";
   };
 
+  # The exact pnpm upstream pins (`packageManager: pnpm@11.15.1`), fetched from
+  # the npm registry. The pnpm used for `fetchPnpmDeps` shapes its output, so
+  # taking whatever pnpm the consumer's nixpkgs ships would make the dependency
+  # hash below depend on the consumer's nixpkgs revision.
+  pnpm = {
+    version = "11.15.1";
+    hash = "sha256-J0YGKbEBEWBOf5iIJ1O1M5iYaCDCDgoGXzpKXp59tx8=";
+  };
+
   # Dependency store for `web` + `web/electron`, from the upstream pnpm
   # lockfile. Shared by the web UI and desktop derivations.
-  pnpmDepsHash = "sha256-m0VbjpVsuOS56BUC+uO2aku7y5s+Oh/tKm9onX/qw6o=";
+  pnpmDepsHash = "sha256-IYmNpinF3KWxxnVJtC7Ae+m23kWRE7Y1N6UxY1/D944=";
 
   # Source-pinned PyPI-only dependencies absent from nixpkgs.
   celPython = {
