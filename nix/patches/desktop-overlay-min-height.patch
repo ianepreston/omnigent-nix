@@ -1,0 +1,20 @@
+diff --git a/web/electron/src/update_overlay.js b/web/electron/src/update_overlay.js
+index 966d271..a9a9442 100644
+--- a/web/electron/src/update_overlay.js
++++ b/web/electron/src/update_overlay.js
+@@ -115,8 +115,14 @@ function createUpdateOverlay({
+     if (!overlay.isVisible()) overlay.showInactive();
+   }
+ 
+-  function position(parent, overlay, height) {
++  function position(parent, overlay, requestedHeight) {
+     if (!parent || parent.isDestroyed() || overlay.isDestroyed()) return;
++    // Never size the overlay to 0px: a reported card height of 0 means
++    // "collapse to the 1px sliver", and the parent's move/resize handler
++    // passes the stored height straight through. On Wayland (seen on GNOME
++    // 50/mutter, which emits a move as it places a new window) a 0px-tall
++    // setBounds aborts the Electron browser process (SIGTRAP) at launch.
++    const height = Math.max(1, requestedHeight);
+     const content = parent.getContentBounds();
+     overlay.setBounds({
+       x: content.x + content.width - OVERLAY_WIDTH - OVERLAY_INSET,

@@ -21,7 +21,13 @@ stdenv.mkDerivation (finalAttrs: {
   inherit (upstream) version src;
   inherit pnpmDeps;
 
-  patches = [ ./patches/desktop-nix.patch ];
+  patches = [
+    ./patches/desktop-nix.patch
+    # Upstream bug, not Nix-specific: the update overlay can be resized to 0px
+    # tall, which aborts Electron on Wayland at launch (GNOME/mutter). Drop
+    # once upstream clamps the height itself.
+    ./patches/desktop-overlay-min-height.patch
+  ];
 
   nativeBuildInputs = [
     nodejs_22
