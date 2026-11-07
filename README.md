@@ -278,16 +278,15 @@ it is superseded once the hash fixup commit lands.
    `upstream`, `flake-lock`, `ci`.
 3. Recommended: give the hash fixup a token that triggers workflows. A push made
    with the default `GITHUB_TOKEN` does not start other workflows, so:
-   * **GitHub App (recommended).** Create a GitHub App owned by you with
-     repository permission *Contents: read and write*, install it on this
-     repository only, and add repository Actions secrets
-     `RENOVATE_HASHES_APP_ID` and `RENOVATE_HASHES_APP_PRIVATE_KEY`. Its push
-     triggers `check` through the normal `pull_request` event.
-     This repo reuses the existing personal app from `ianepreston/nixos` (its
-     `FLAKE_UPDATE_APP_*`), installed on this repository too; set the secrets
-     here to that app's ID and a private key:
+   * **GitHub App (recommended).** This repo reuses the existing personal app
+     from `ianepreston/nixos` (its `FLAKE_UPDATE_APP_*`), installed on this
+     repository too. If that app is unavailable, create a GitHub App owned by
+     you with repository permission *Contents: read and write* and install it
+     on this repository. Either way, set repository Actions secrets to the
+     app's ID and a private key:
      `gh secret set RENOVATE_HASHES_APP_ID --body <app-id>` and
      `gh secret set RENOVATE_HASHES_APP_PRIVATE_KEY < app-private-key.pem`.
+     Its push triggers `check` through the normal `pull_request` event.
    * **No secrets (fallback).** The fixup is pushed with `GITHUB_TOKEN` and the
      job then dispatches `check.yml` on the branch (`workflow_dispatch` is the
      one event `GITHUB_TOKEN` may start). The workflow requests the
