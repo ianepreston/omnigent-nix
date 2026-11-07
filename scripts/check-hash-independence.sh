@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prove the fixed-output hashes (upstream source, pnpm dependency store, pinned
-# Python sdists) do not depend on the consumer's nixpkgs revision.
+# Python sdists, the cel-python wheel) do not depend on the consumer's nixpkgs
+# revision.
 #
 #   scripts/check-hash-independence.sh [<nixpkgs-rev-or-flake-ref> ...]
 #
@@ -39,6 +40,9 @@ check() { # <label> [extra nix args...]
     nix build "path:$PWD#packages.$system.omnigent.pythonSources.$n" --no-link --rebuild "$@" >/dev/null
     echo "ok  $label  python sdist $n (re-fetched, hash matches)"
   done
+  nix build "path:$PWD#packages.$system.omnigent.celPythonSource" --no-link "$@" >/dev/null
+  nix build "path:$PWD#packages.$system.omnigent.celPythonSource" --no-link --rebuild "$@" >/dev/null
+  echo "ok  $label  cel-python wheel (re-fetched, hash matches)"
 }
 
 check "own-nixpkgs"

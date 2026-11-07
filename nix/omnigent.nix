@@ -228,6 +228,8 @@ callPackage ./launchers.nix { } {
       ;
     # Fixed-output sources of the pinned dependencies, for hash-independence checks.
     pythonSources = lib.mapAttrs (n: _: py.${n}.src) upstream.pythonPins;
+    # The pinned cel-python wheel (celPython in source.nix), likewise.
+    celPythonSource = cel-python.src;
   };
   meta = {
     description = "Declarative agent authoring and runtime framework (server, CLI, host)";

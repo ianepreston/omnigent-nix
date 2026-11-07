@@ -13,9 +13,10 @@ name: check
 # history. Flip `required` in the matrix once they do.
 #
 # No check is a NixOS VM test today (nix/checks.nix is runCommand-only), so KVM
-# is not strictly needed. It is enabled on the Linux runners anyway so that a
-# future `pkgs.testers.runNixOSTest` check runs instead of failing on a missing
-# `kvm` system feature.
+# is not strictly needed. It is enabled on the x86_64-linux runner anyway so
+# that a future `pkgs.testers.runNixOSTest` check runs there instead of failing
+# on a missing `kvm` system feature. GitHub's arm64 runners have no usable
+# /dev/kvm, so a VM test would have to be x86_64-only.
 #
 # Cache: plain cache.nixos.org substitution. Everything from nixpkgs (Electron,
 # Python, Node) is substituted; only this flake's own derivations are built.
@@ -100,8 +101,10 @@ jobs:
         with:
           docker-images: false
           large-packages: false
+      # GitHub's arm64 Linux runners expose no usable /dev/kvm, so this is
+      # x86_64-only; no check needs kvm today (see the header).
       - name: Enable KVM
-        if: runner.os == 'Linux'
+        if: matrix.system == 'x86_64-linux'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -117,7 +120,7 @@ jobs:
           determinate: false
           extra-conf: |
             experimental-features = nix-command flakes
-            system-features = nixos-test benchmark big-parallel kvm
+            ${{ matrix.system == 'x86_64-linux' && 'system-features = nixos-test benchmark big-parallel kvm' || '' }}
       - name: Build packages
         env:
           SYSTEM: ${{ matrix.system }}

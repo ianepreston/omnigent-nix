@@ -230,9 +230,9 @@ Renovate normally does this for you (see [Automation](#automation)). By hand:
    It only updates existing Python pins; whether a package still needs pinning,
    or a new one does, is a judgement call.
 3. `scripts/check-hash-independence.sh <consumer-nixpkgs-rev>` re-fetches every
-   fixed-output derivation (source, pnpm dependency store, pinned sdists) with
-   `--rebuild` under this flake's nixpkgs and under the given revision, and fails
-   on any hash mismatch. Pass the revision your consumer locks, e.g.
+   fixed-output derivation (source, pnpm dependency store, pinned sdists, the
+   cel-python wheel) with `--rebuild` under this flake's nixpkgs and under the
+   given revision, and fails on any hash mismatch. Pass the revision your consumer locks, e.g.
    `jq -r '.nodes["nixpkgs-unstable"].locked.rev' ../nixos/flake.lock`. (A plain
    build is not a proof: Nix skips a fixed-output derivation whose output is
    already in the store.)
@@ -263,8 +263,8 @@ CI has built and tested, and a human merges it. Nothing auto-merges.
   (macos-latest): the same, but advisory (`continue-on-error`) until they have a
   green history; these systems were previously only evaluated.
 
-No check is a NixOS VM test today; KVM is enabled on the Linux runners so one
-added later runs. Substitution is plain cache.nixos.org (no extra cache).
+No check is a NixOS VM test today; KVM is enabled on the x86_64-linux runner so
+one added later runs there (GitHub's arm64 runners have no usable `/dev/kvm`). Substitution is plain cache.nixos.org (no extra cache).
 
 The first `check` run on a fresh omnigent PR fails on the stale source hash;
 it is superseded once the hash fixup commit lands.
@@ -283,6 +283,11 @@ it is superseded once the hash fixup commit lands.
      repository only, and add repository Actions secrets
      `RENOVATE_HASHES_APP_ID` and `RENOVATE_HASHES_APP_PRIVATE_KEY`. Its push
      triggers `check` through the normal `pull_request` event.
+     This repo reuses the existing personal app from `ianepreston/nixos` (its
+     `FLAKE_UPDATE_APP_*`), installed on this repository too; set the secrets
+     here to that app's ID and a private key:
+     `gh secret set RENOVATE_HASHES_APP_ID --body <app-id>` and
+     `gh secret set RENOVATE_HASHES_APP_PRIVATE_KEY < app-private-key.pem`.
    * **No secrets (fallback).** The fixup is pushed with `GITHUB_TOKEN` and the
      job then dispatches `check.yml` on the branch (`workflow_dispatch` is the
      one event `GITHUB_TOKEN` may start). The workflow requests the
