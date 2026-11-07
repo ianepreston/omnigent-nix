@@ -1,0 +1,145 @@
+---
+name: check
+# Gate for PRs and main: lint + full-flake evaluation on every system, then a
+# real build of every package and `checks.<system>.*` on GitHub-hosted runners.
+#
+# Where each system is built:
+#   x86_64-linux   ubuntu-latest     required; every package and every check
+#   aarch64-linux  ubuntu-24.04-arm  advisory (continue-on-error), see below
+#   aarch64-darwin macos-latest      advisory (continue-on-error), see below
+# The README has long said only x86_64-linux is built and tested; the other two
+# systems were "evaluate; not built". They are built here so regressions are
+# visible, but a failure there does not fail the run until they have a green
+# history. Flip `required` in the matrix once they do.
+#
+# No check is a NixOS VM test today (nix/checks.nix is runCommand-only), so KVM
+# is not strictly needed. It is enabled on the x86_64-linux runner anyway so
+# that a future `pkgs.testers.runNixOSTest` check runs there instead of failing
+# on a missing `kvm` system feature. GitHub's arm64 runners have no usable
+# /dev/kvm, so a VM test would have to be x86_64-only.
+#
+# Cache: plain cache.nixos.org substitution. Everything from nixpkgs (Electron,
+# Python, Node) is substituted; only this flake's own derivations are built.
+#
+# Third-party actions are pinned to full commit SHAs with the tag in a trailing
+# comment; Renovate's github-actions manager bumps both (renovate.json holds
+# them for 7 days). A tag can be repointed by the action's owner; a SHA can't.
+#
+# Renovate omnigent PRs: the first run on a Renovate commit fails on the stale
+# fixed-output hash; renovate-hashes.yml pushes the regenerated hashes and this
+# workflow runs again on that commit (see the token notes there).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    name: lint and evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+      # A flake.nix input that flake.lock doesn't match would be silently
+      # re-locked by every nix command below; fail instead.
+      - name: flake.lock matches flake.nix
+        run: nix flake metadata --no-update-lock-file . >/dev/null
+      - name: Evaluate every output on every system
+        run: nix flake check --no-build --all-systems --no-update-lock-file
+      - name: nixfmt
+        run: git ls-files -z '*.nix' | xargs -0 nix run --inputs-from . nixpkgs#nixfmt -- --check
+      - name: shellcheck
+        run: nix run --inputs-from . nixpkgs#shellcheck -- scripts/*.sh
+      # shellcheck on PATH so actionlint also lints every `run:` script.
+      - name: actionlint
+        run: nix shell --inputs-from . nixpkgs#actionlint nixpkgs#shellcheck -c actionlint
+      # Renovate's engines field wants a newer Node than the runner image ships.
+      - name: renovate-config-validator
+        run: |
+          nix shell --inputs-from . nixpkgs#nodejs_24 -c \
+            npx --yes --package renovate -- renovate-config-validator --strict
+
+  build:
+    name: build ${{ matrix.system }}
+    needs: lint
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ !matrix.required }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+            required: true
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            required: false
+          - system: aarch64-darwin
+            runner: macos-latest
+            required: false
+    steps:
+      # The x86_64 image ships ~30 GB of SDKs this job never uses; the desktop
+      # closure (Electron) plus the web build need the room.
+      - name: Free disk space
+        if: matrix.system == 'x86_64-linux'
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          docker-images: false
+          large-packages: false
+      # GitHub's arm64 Linux runners expose no usable /dev/kvm, so this is
+      # x86_64-only; no check needs kvm today (see the header).
+      - name: Enable KVM
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+            ${{ matrix.system == 'x86_64-linux' && 'system-features = nixos-test benchmark big-parallel kvm' || '' }}
+      - name: Build packages
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          set -euo pipefail
+          for attr in $(nix eval --json ".#packages.$SYSTEM" --apply builtins.attrNames | jq -r '.[]'); do
+            echo "::group::packages.$SYSTEM.$attr"
+            nix build --no-update-lock-file --no-link --print-build-logs ".#packages.$SYSTEM.$attr"
+            echo "::endgroup::"
+          done
+      # Building a check runs it. Built one by one rather than `nix flake check`
+      # so a failure names the check and the logs are grouped.
+      - name: Build checks
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          set -euo pipefail
+          for attr in $(nix eval --json ".#checks.$SYSTEM" --apply builtins.attrNames | jq -r '.[]'); do
+            echo "::group::checks.$SYSTEM.$attr"
+            nix build --no-update-lock-file --no-link --print-build-logs ".#checks.$SYSTEM.$attr"
+            echo "::endgroup::"
+          done

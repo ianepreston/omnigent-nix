@@ -11,6 +11,7 @@ let
   inherit (pkgs) lib;
   isLinux = pkgs.stdenv.hostPlatform.isLinux;
   p = self.packages.${system};
+  upstream = pkgs.callPackage ./source.nix { };
 
   # Evaluating a derivation path is the check; nothing is built.
   evalOnly =
@@ -517,7 +518,7 @@ let
           omni --version >/dev/null
 
           # Deterministic build metadata: epoch from SOURCE_DATE_EPOCH, pinned commit.
-          grep -q '2f636330' version.txt
+          grep -q '${builtins.substring 0 8 upstream.commit}' version.txt
           grep -q 'built 1980-01-02' version.txt
 
           # The self-updater must refuse and point at the flake.
