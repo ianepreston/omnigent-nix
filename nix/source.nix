@@ -1,8 +1,15 @@
 # The single upstream release this flake packages. A version bump changes this
 # file (tag, source hash, pnpm dependency hash) in one reviewable change;
-# `scripts/update-hashes.sh` regenerates the fixed-output hashes.
+# `scripts/update-hashes.sh` regenerates the fixed-output hashes and re-syncs
+# the pins below that are copied from upstream's lockfiles.
+#
+# Renovate (renovate.json) rewrites `version` and `commit` together from the
+# annotation below; .github/workflows/renovate-hashes.yml then runs
+# `scripts/update-hashes.sh` on the PR branch. Keep `commit` within a few lines
+# of `version`, or the Renovate match stops spanning both.
 { fetchFromGitHub }:
 rec {
+  # renovate: datasource=github-tags depName=omnigent-ai/omnigent versioning=pep440
   version = "0.21.0";
   tag = "v${version}";
   # Commit the tag points at. Injected into the build metadata instead of
@@ -16,8 +23,8 @@ rec {
     hash = "sha256-qj1o4K3dQ0bA99ij9MILfb/SUqK+/11kRhLvZM30vuQ=";
   };
 
-  # The exact pnpm upstream pins (`packageManager: pnpm@11.15.1`), fetched from
-  # the npm registry. The pnpm used for `fetchPnpmDeps` shapes its output, so
+  # The exact pnpm upstream pins (`packageManager` in its package.json), fetched
+  # from the npm registry. The pnpm used for `fetchPnpmDeps` shapes its output, so
   # taking whatever pnpm the consumer's nixpkgs ships would make the dependency
   # hash below depend on the consumer's nixpkgs revision.
   pnpm = {
@@ -36,8 +43,8 @@ rec {
     wheelSha256 = "d0f85008b89655c2bb18d797d2fa3f96f2ed80f4a3b43b0e8138c6646581e5f6";
   };
 
-  # ABI-sensitive Python dependencies pinned to upstream v0.21.0's uv.lock
-  # (sdist sha256). nixpkgs-unstable is newer than upstream's constraints for
+  # ABI-sensitive Python dependencies pinned to the tagged release's uv.lock
+  # (sdist sha256; versions and hashes re-synced by `scripts/update-hashes.sh`). nixpkgs-unstable is newer than upstream's constraints for
   # these (openai <2.45, mcp <2, websockets <15, certifi >=2026.10.19), so they
   # are built from the locked releases instead of relaxing the constraints.
   pythonPins = {
