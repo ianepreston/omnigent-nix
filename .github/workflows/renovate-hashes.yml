@@ -1,0 +1,125 @@
+---
+name: renovate hashes
+# Renovate's omnigent PR rewrites `version` and `commit` in nix/source.nix and
+# nothing else. The hashes beside them are fixed-output derivations' declared
+# content addresses, which no string substitution can derive, and several pins
+# (pnpm, cel-python, pythonPins) are copied from the new release's lockfiles.
+# This job runs scripts/update-hashes.sh on the branch (regenerates the source,
+# pnpm and pnpm-store hashes and re-syncs the lockfile pins), proves the result
+# is independent of nixpkgs with scripts/check-hash-independence.sh, and pushes
+# a fixup commit. check.yml then builds and tests that commit.
+#
+# Branches that don't touch nix/source.nix (lock file maintenance, GitHub
+# Actions bumps) are skipped: the fixed-output hashes are nixpkgs-independent
+# by construction, and check.yml re-fetches and verifies them on a cold store.
+#
+# Token: a push made with the default GITHUB_TOKEN does not trigger workflows,
+# so check.yml would never run on the fixup commit. Two modes:
+#   * GitHub App (recommended). Set repository secrets RENOVATE_HASHES_APP_ID
+#     and RENOVATE_HASHES_APP_PRIVATE_KEY for an app installed on this repo
+#     with Contents: read & write (and Workflows: read & write if Renovate
+#     will ever touch .github/workflows on the same branch). Its push
+#     triggers check.yml through the normal pull_request event.
+#   * Fallback (no secrets). The push uses GITHUB_TOKEN and this job then
+#     dispatches check.yml on the branch with `gh workflow run`;
+#     workflow_dispatch is the one event GITHUB_TOKEN may trigger. The run is
+#     attached to the fixup commit, so the PR shows its result.
+#
+# The commit author is pinned to the address in renovate.json's
+# `gitIgnoredAuthors`; otherwise Renovate would read the branch as
+# human-edited and stop rebasing it onto newer releases.
+#
+# No fork guard is needed: `push` only fires for branches in this repo.
+on:
+  push:
+    branches: ["renovate/**"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Regenerate even if the branch does not change nix/source.nix.
+        type: boolean
+        default: false
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: write # fallback-mode push with GITHUB_TOKEN
+  actions: write # fallback-mode `gh workflow run check.yml`
+jobs:
+  regen:
+    name: regenerate fixed-output hashes
+    # The app-token push of our own fixup re-triggers this workflow; skip it
+    # by subject line instead of paying for another network build.
+    if: ${{ !contains(github.event.head_commit.message, 'regenerate fixed-output hashes') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HAS_APP: ${{ secrets.RENOVATE_HASHES_APP_ID != '' }}
+    steps:
+      - name: Mint app token
+        id: app-token
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.RENOVATE_HASHES_APP_ID }}
+          private-key: ${{ secrets.RENOVATE_HASHES_APP_PRIVATE_KEY }}
+      # fetch-depth 0 makes origin/<default branch> available for the diff.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+      - name: Does the branch change the upstream pin?
+        id: scope
+        env:
+          BASE: origin/${{ github.event.repository.default_branch }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE" = true ] || ! git diff --quiet "$BASE...HEAD" -- nix/source.nix; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch does not change nix/source.nix; nothing to regenerate"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Nix
+        if: steps.scope.outputs.run == 'true'
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: Regenerate hashes and lockfile pins
+        if: steps.scope.outputs.run == 'true'
+        run: scripts/update-hashes.sh
+      # Re-fetches every fixed-output derivation with --rebuild. This is also
+      # what verifies the pythonPins / celPython sha256 values just copied from
+      # upstream's uv.lock against PyPI.
+      - name: Check hash independence
+        if: steps.scope.outputs.run == 'true'
+        run: scripts/check-hash-independence.sh
+      - name: Push the fixup
+        id: push
+        if: steps.scope.outputs.run == 'true'
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "hashes and pins already match the pinned release"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git --no-pager diff
+          git config user.name "omnigent-nix hash regen"
+          git config user.email "omnigent-nix-hash-regen@users.noreply.github.com"
+          git commit --all --message "chore(deps): regenerate fixed-output hashes"
+          git push origin "HEAD:$BRANCH"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+      - name: Dispatch check on the fixup (GITHUB_TOKEN fallback)
+        if: steps.push.outputs.pushed == 'true' && env.HAS_APP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: gh workflow run check.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"

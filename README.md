@@ -32,7 +32,7 @@ not need Electron. Python dependencies that upstream pins are built from the
 locked releases, so they do not depend on the nixpkgs revision.
 
 The package and modules are one lockstep unit pinned to a single upstream
-release (**v0.21.0**). Omnigent's self-updater (`omni upgrade`) and the desktop
+release (`version` in `nix/source.nix`). Omnigent's self-updater (`omni upgrade`) and the desktop
 auto-updater are disabled; you update with `nix flake update omnigent`.
 
 ## Outputs
@@ -47,8 +47,9 @@ overlays.default                                      # pkgs.omnigent, pkgs.omni
 checks.<system>.*  formatter.<system>
 ```
 
-Systems: `x86_64-linux` (built and tested), `aarch64-linux` and `aarch64-darwin`
-(evaluate; not built). `x86_64-darwin` is dropped because nixpkgs 26.11 no longer
+Systems: `x86_64-linux` (built and tested in CI), `aarch64-linux` and
+`aarch64-darwin` (evaluated; built and tested in CI as advisory jobs, see
+[Automation](#automation)). `x86_64-darwin` is dropped because nixpkgs 26.11 no longer
 supports it. The desktop and the runner image are Linux outputs. This flake does
 not yet build a macOS desktop bundle; on macOS use the upstream app (a packaging
 limitation of this flake, not a property of Omnigent), and
@@ -181,7 +182,7 @@ npm-based installer. Run a host once by hand with
   The `bin/` entry points therefore run on a `python3.withPackages` interpreter
   that sees the whole closure itself, with no `PYTHONPATH` leaking into the
   subprocesses agents launch (`checks.*.child-interpreter`).
-* **Web UI.** `pnpm` — pinned to upstream's exact 11.15.1 from the npm registry, not nixpkgs' pnpm, so the dependency-store hash does not vary with the consumer's nixpkgs — installs upstream's locked workspace
+* **Web UI.** `pnpm` — pinned to the exact version upstream's `packageManager` names, from the npm registry, not nixpkgs' pnpm, so the dependency-store hash does not vary with the consumer's nixpkgs — installs upstream's locked workspace
   offline (`fetchPnpmDeps`); Vite builds the SPA, which is then bundled with
   `OMNIGENT_SKIP_WEB_UI=true` for the Python phase.
 * **Deterministic metadata.** `setup.py` is patched to use `SOURCE_DATE_EPOCH`
@@ -218,29 +219,98 @@ use a `path:` reference.
 
 ### Bumping Omnigent
 
-1. Edit `version` and `commit` in `nix/source.nix` (the tag's commit:
-   `git ls-remote --tags https://github.com/omnigent-ai/omnigent`).
-2. `scripts/update-hashes.sh` regenerates the source and pnpm hashes.
-3. If the lockfile or `cel-python` pin changed upstream, update
-   `celPython` in `nix/source.nix` from upstream's `uv.lock`.
-4. `scripts/check-hash-independence.sh <consumer-nixpkgs-rev>` re-fetches every
+Renovate normally does this for you (see [Automation](#automation)). By hand:
+
+1. Edit `version` in `nix/source.nix`.
+2. `scripts/update-hashes.sh` (Linux with Nix) regenerates the source hash,
+   then re-syncs the pins copied from the new release
+   (`scripts/sync-upstream-pins.py`: `commit` from the tag, the pnpm version from
+   `packageManager`, `celPython` and every existing `pythonPins` entry from
+   `uv.lock`), then regenerates the pnpm tarball and dependency-store hashes.
+   It only updates existing Python pins; whether a package still needs pinning,
+   or a new one does, is a judgement call.
+3. `scripts/check-hash-independence.sh <consumer-nixpkgs-rev>` re-fetches every
    fixed-output derivation (source, pnpm dependency store, pinned sdists) with
    `--rebuild` under this flake's nixpkgs and under the given revision, and fails
    on any hash mismatch. Pass the revision your consumer locks, e.g.
    `jq -r '.nodes["nixpkgs-unstable"].locked.rev' ../nixos/flake.lock`. (A plain
    build is not a proof: Nix skips a fixed-output derivation whose output is
    already in the store.)
-5. `nix flake check`.
+4. `nix flake check`.
 
-Release automation (new-tag detection, CI hash regeneration, a host-tunnel test)
-is not set up yet.
+## Automation
+
+[Renovate](https://docs.renovatebot.com/) (`renovate.json`) and GitHub Actions
+(`.github/workflows/`) keep the flake current; every update arrives as a PR that
+CI has built and tested, and a human merges it. Nothing auto-merges.
+
+| What | How | Cadence |
+| --- | --- | --- |
+| Upstream Omnigent release | Regex manager on the `# renovate:` annotation in `nix/source.nix` (`github-tags`, PEP 440, final `X.Y.Z` only; release candidates and `.dev` tags are ignored). Rewrites `version` and `commit`. | As released |
+| Hashes and lockfile pins for that release | `renovate-hashes.yml` runs `scripts/update-hashes.sh` and `scripts/check-hash-independence.sh` on the PR branch and pushes a `chore(deps): regenerate fixed-output hashes` commit. | On every push to a `renovate/**` branch that changes `nix/source.nix` |
+| `flake.lock` (nixpkgs, home-manager) | Renovate lock file maintenance (`nix flake update`). Per-input digest PRs are disabled. | Weekly, before 06:00 Monday (America/Edmonton) |
+| GitHub Actions | Renovate `github-actions` manager, SHA-pinned, grouped, 7-day minimum release age. | Weekly |
+
+`check.yml` runs on every PR, on pushes to `main`, and on demand:
+
+* **lint and evaluate** (ubuntu-latest): `flake.lock` matches `flake.nix`,
+  `nix flake check --no-build --all-systems`, nixfmt, shellcheck, actionlint,
+  `renovate-config-validator`.
+* **build x86_64-linux** (ubuntu-latest, required): builds every package and
+  every `checks.x86_64-linux.*` (building a check runs it), on a cold store, so
+  every fixed-output hash is re-fetched and verified.
+* **build aarch64-linux** (ubuntu-24.04-arm) and **build aarch64-darwin**
+  (macos-latest): the same, but advisory (`continue-on-error`) until they have a
+  green history; these systems were previously only evaluated.
+
+No check is a NixOS VM test today; KVM is enabled on the Linux runners so one
+added later runs. Substitution is plain cache.nixos.org (no extra cache).
+
+The first `check` run on a fresh omnigent PR fails on the stale source hash;
+it is superseded once the hash fixup commit lands.
+
+### One-time setup
+
+1. Install the [Renovate GitHub App](https://github.com/apps/renovate) on this
+   repository. `renovate.json` is already present, so there is no onboarding PR;
+   the Dependency Dashboard issue appears after the first run.
+2. Create labels Renovate applies, or let it create them: `dependencies`,
+   `upstream`, `flake-lock`, `ci`.
+3. Recommended: give the hash fixup a token that triggers workflows. A push made
+   with the default `GITHUB_TOKEN` does not start other workflows, so:
+   * **GitHub App (recommended).** Create a GitHub App owned by you with
+     repository permission *Contents: read and write*, install it on this
+     repository only, and add repository Actions secrets
+     `RENOVATE_HASHES_APP_ID` and `RENOVATE_HASHES_APP_PRIVATE_KEY`. Its push
+     triggers `check` through the normal `pull_request` event.
+   * **No secrets (fallback).** The fixup is pushed with `GITHUB_TOKEN` and the
+     job then dispatches `check.yml` on the branch (`workflow_dispatch` is the
+     one event `GITHUB_TOKEN` may start). The workflow requests the
+     `contents: write` and `actions: write` it needs itself.
+4. Optional: protect `main` and require the `build x86_64-linux` and
+   `lint and evaluate` checks.
+
+The fixup commit's author (`omnigent-nix-hash-regen@users.noreply.github.com`)
+is listed in `gitIgnoredAuthors`, so Renovate keeps rebasing the PR onto newer
+releases instead of treating it as human-edited.
+
+### Running it by hand
+
+* Re-run CI on any branch: `gh workflow run check.yml --ref <branch>`.
+* Regenerate hashes on a branch: `gh workflow run renovate-hashes.yml --ref
+  <branch>` (add `-f force=true` if the branch does not change
+  `nix/source.nix`).
+* Ask Renovate to check now: tick the box on the Dependency Dashboard issue.
+* Validate the Renovate config locally:
+  `npx --yes --package renovate -- renovate-config-validator --strict`
+  (needs Node 24).
 
 ## Known limitations
 
 * Python dependencies that upstream pins are built from upstream's locked
-  releases (`pythonPins` in `nix/source.nix`: `openai` 2.41.0, `openai-agents`
-  0.13.6, `mcp` 1.30.0, `websockets` 14.2, `certifi` 2026.10.19) with every
-  runtime-deps check on and no `pythonRelaxDeps`. Other dependencies track
+  releases (`pythonPins` in `nix/source.nix`: `openai`, `openai-agents`, `mcp`,
+  `websockets`, `certifi`, at the versions in the tagged release's `uv.lock`)
+  with every runtime-deps check on and no `pythonRelaxDeps`. Other dependencies track
   nixpkgs.
 * This flake does not yet build a macOS desktop bundle; on macOS use the upstream
   app. (A packaging limitation of this flake, not a property of Omnigent.)
