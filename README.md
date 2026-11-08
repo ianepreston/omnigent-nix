@@ -195,6 +195,11 @@ npm-based installer. Run a host once by hand with
   launches with a minimal `PATH` still find it. Upstream already requires an
   explicit action before the desktop connects the machine as a host; the flake
   does not change that.
+* **Desktop update overlay.** An upstream bug fix, not a packaging change: the
+  update-toast child window could be resized to 0px tall when its parent window
+  moved, which aborts Electron on Wayland under GNOME/mutter right after launch.
+  The patch clamps it to the 1px sliver upstream intends. Drop it once upstream
+  ships the fix.
 
 Patches against upstream live in `nix/patches/`.
 
