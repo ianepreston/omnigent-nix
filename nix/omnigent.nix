@@ -73,7 +73,25 @@ let
     );
   python = python3.override {
     self = python;
-    packageOverrides = _: prev: lib.genAttrs (lib.attrNames upstream.pythonPins) (pin prev);
+    packageOverrides =
+      _: prev:
+      lib.genAttrs (lib.attrNames upstream.pythonPins) (pin prev)
+      // {
+        # Both suites have one builder-sensitive test that failed in PR CI.
+        # Keep the rest of their checks enabled; remove these when nixpkgs does.
+        pyarrow = prev.pyarrow.overridePythonAttrs (o: {
+          disabledTestPaths = (o.disabledTestPaths or [ ]) ++ [
+            # Memory use differs slightly between runs (4112 vs 3856 bytes).
+            "pyarrow/tests/test_csv.py::TestThreadedStreamingCSVRead::test_batch_lifetime"
+          ];
+        });
+        uvloop = prev.uvloop.overridePythonAttrs (o: {
+          disabledTestPaths = (o.disabledTestPaths or [ ]) ++ [
+            # https://github.com/NixOS/nixpkgs/issues/572977
+            "tests/test_process.py::Test_UV_Process_Delayed::test_process_delayed_stdio__not_paused__no_stdin"
+          ];
+        });
+      };
   };
   py = python.pkgs;
 
