@@ -30,6 +30,38 @@ let
         patches = [ ];
         doCheck = false;
       }
+      // lib.optionalAttrs (name == "openai") {
+        # nixpkgs' openai is a newer major (3.x) whose recipe no longer fits
+        # the locked 2.x sdist, so declare 2.x's own: its postPatch relaxes a
+        # different exact hatchling pin (and patches tests we don't run), its
+        # build-system dropped hatch-fancy-pypi-readme, and its dependencies
+        # swapped httpx for httpx2 and dropped distro/tqdm. The list below is
+        # 2.41.0's pyproject `dependencies`. `--replace-fail` breaks loudly if
+        # a pin bump changes the hatchling pin.
+        postPatch = ''
+          substituteInPlace pyproject.toml \
+            --replace-fail '"hatchling==1.26.3"' '"hatchling"'
+        '';
+        build-system = [
+          prev.hatchling
+          prev.hatch-fancy-pypi-readme
+        ];
+        dependencies = with prev; [
+          anyio
+          distro
+          httpx
+          jiter
+          pydantic
+          sniffio
+          tqdm
+          typing-extensions
+        ];
+      }
+      // lib.optionalAttrs (name == "openai-agents") {
+        # Newer nixpkgs openai-agents dropped types-requests, which the locked
+        # 0.13.x still lists as a runtime dependency.
+        dependencies = (o.dependencies or [ ]) ++ [ prev.types-requests ];
+      }
       // lib.optionalAttrs (name == "mcp") {
         # 2.x split types into a separate package that 1.x does not have, and
         # 1.x needs two packages the 2.x set dropped.
@@ -69,6 +101,16 @@ let
     pythonImportsCheck = [ "celpy" ];
   };
 
+  # Both SDK pyprojects cap `hatchling<1.32.0` because 1.32 writes core
+  # metadata 2.5, which twine/PyPI do not accept yet. That only matters for
+  # uploading; a Nix build never uploads, and nixpkgs ships hatchling 1.32, so
+  # drop the cap. `--replace-fail` breaks the build once upstream removes it,
+  # which is the cue to delete this.
+  dropHatchlingCap = ''
+    substituteInPlace pyproject.toml \
+      --replace-fail '"hatchling>=1.27,<1.32.0"' '"hatchling>=1.27"'
+  '';
+
   # `omnigent-client` and `omnigent-ui-sdk` are built from the same source
   # revision and installed alongside the main package. omnigent-client's
   # requirement on `omnigent==X` is a metadata-only back-edge of a cycle:
@@ -79,6 +121,7 @@ let
     inherit (upstream) version src;
     pyproject = true;
     sourceRoot = "${upstream.src.name}/sdks/python-client";
+    postPatch = dropHatchlingCap;
     build-system = [ py.hatchling ];
     dependencies = with py; [
       httpx
@@ -94,6 +137,7 @@ let
     inherit (upstream) version src;
     pyproject = true;
     sourceRoot = "${upstream.src.name}/sdks/ui";
+    postPatch = dropHatchlingCap;
     build-system = [ py.hatchling ];
     dependencies =
       (with py; [
