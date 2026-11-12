@@ -10,11 +10,11 @@
 { fetchFromGitHub }:
 rec {
   # renovate: datasource=github-tags depName=omnigent-ai/omnigent versioning=pep440
-  version = "0.21.0";
+  version = "0.22.0";
   tag = "v${version}";
   # Commit the tag points at. Injected into the build metadata instead of
   # running `git rev-parse` (there is no .git in the Nix sandbox).
-  commit = "2f636330cc6e28bfe1d22f741eda6db34a192d39";
+  commit = "a9a0a163dc89e7945b2612b9d61488e7a157fa26";
 
   src = fetchFromGitHub {
     owner = "omnigent-ai";
