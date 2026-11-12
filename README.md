@@ -316,11 +316,10 @@ releases instead of treating it as human-edited.
 
 ## Known limitations
 
-* Python dependencies that upstream pins are built from upstream's locked
-  releases (`pythonPins` in `nix/source.nix`: `openai`, `openai-agents`, `mcp`,
-  `websockets`, `certifi`, at the versions in the tagged release's `uv.lock`)
-  with every runtime-deps check on and no `pythonRelaxDeps`. Other dependencies track
-  nixpkgs.
+* Python dependencies whose nixpkgs versions exceed upstream's compatible
+  ranges are built from upstream's locked releases (`pythonPins` in
+  `nix/source.nix`: `openai`, `openai-agents`, `mcp`, and `websockets`). Other
+  dependencies use unmodified nixpkgs packages and their binary caches.
 * This flake does not yet build a macOS desktop bundle; on macOS use the upstream
   app. (A packaging limitation of this flake, not a property of Omnigent.)
 * `omnigent-runner-image` and the `withKubernetes` variant

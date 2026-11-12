@@ -43,10 +43,13 @@ rec {
     wheelSha256 = "d0f85008b89655c2bb18d797d2fa3f96f2ed80f4a3b43b0e8138c6646581e5f6";
   };
 
-  # ABI-sensitive Python dependencies pinned to the tagged release's uv.lock
-  # (sdist sha256; versions and hashes re-synced by `scripts/update-hashes.sh`). nixpkgs-unstable is newer than upstream's constraints for
-  # these (openai <2.45, mcp <2, websockets <15, certifi >=2026.10.19), so they
-  # are built from the locked releases instead of relaxing the constraints.
+  # Version-sensitive Python dependencies pinned to the tagged release's
+  # uv.lock (sdist sha256; versions and hashes re-synced by
+  # `scripts/update-hashes.sh`). nixpkgs-unstable exceeds upstream's compatible
+  # ranges for these (openai <2.45, mcp <2, websockets <15), so only these are
+  # built from the locked releases instead of relaxing the constraints.
+  # certifi is deliberately not pinned: upstream requires >=2026.10.19, which
+  # current nixpkgs-unstable satisfies with its stock cached package.
   pythonPins = {
     openai = {
       version = "2.41.0";
@@ -67,11 +70,6 @@ rec {
       version = "14.2";
       sdistName = "websockets";
       sha256 = "5059ed9c54945efb321f097084b4c7e52c246f2c869815876a69d1efc4ad6eb5";
-    };
-    certifi = {
-      version = "2026.10.19";
-      sdistName = "certifi";
-      sha256 = "035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae";
     };
   };
 }

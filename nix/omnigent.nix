@@ -12,18 +12,21 @@
   withKubernetes ? false,
 }:
 let
-  # Build the ABI-sensitive dependencies at the versions upstream locks (see
-  # `pythonPins` in source.nix) so every runtime-deps check passes unrelaxed.
-  pin =
-    prev: name:
-    prev.${name}.overridePythonAttrs (
+  py = python3.pkgs;
+
+  # Build only the version-sensitive dependencies from upstream's lock. Keep
+  # the rest of nixpkgs' Python package set untouched so its cached outputs
+  # retain their original derivation hashes.
+  pinned = lib.mapAttrs (
+    name: _:
+    py.${name}.overridePythonAttrs (
       o:
       let
         v = upstream.pythonPins.${name};
       in
       {
         inherit (v) version;
-        src = prev.fetchPypi {
+        src = py.fetchPypi {
           pname = v.sdistName;
           inherit (v) version sha256;
         };
@@ -43,10 +46,10 @@ let
             --replace-fail '"hatchling==1.26.3"' '"hatchling"'
         '';
         build-system = [
-          prev.hatchling
-          prev.hatch-fancy-pypi-readme
+          py.hatchling
+          py.hatch-fancy-pypi-readme
         ];
-        dependencies = with prev; [
+        dependencies = with py; [
           anyio
           distro
           httpx
@@ -59,41 +62,30 @@ let
       }
       // lib.optionalAttrs (name == "openai-agents") {
         # Newer nixpkgs openai-agents dropped types-requests, which the locked
-        # 0.13.x still lists as a runtime dependency.
-        dependencies = (o.dependencies or [ ]) ++ [ prev.types-requests ];
+        # 0.13.x still lists as a runtime dependency. Use the pinned versions
+        # of its openai/mcp/websockets dependencies as well.
+        dependencies = replacePinned (o.dependencies or [ ]) ++ [ py.types-requests ];
       }
       // lib.optionalAttrs (name == "mcp") {
         # 2.x split types into a separate package that 1.x does not have, and
         # 1.x needs two packages the 2.x set dropped.
-        dependencies = lib.filter (d: (d.pname or "") != "mcp-types") (o.dependencies or [ ]) ++ [
-          prev.httpx-sse
-          prev.pydantic-settings
-        ];
+        dependencies =
+          replacePinned (lib.filter (d: (d.pname or "") != "mcp-types") (o.dependencies or [ ]))
+          ++ [
+            py.httpx-sse
+            py.pydantic-settings
+          ];
       }
-    );
-  python = python3.override {
-    self = python;
-    packageOverrides =
-      _: prev:
-      lib.genAttrs (lib.attrNames upstream.pythonPins) (pin prev)
-      // {
-        # Both suites have one builder-sensitive test that failed in PR CI.
-        # Keep the rest of their checks enabled; remove these when nixpkgs does.
-        pyarrow = prev.pyarrow.overridePythonAttrs (o: {
-          disabledTestPaths = (o.disabledTestPaths or [ ]) ++ [
-            # Memory use differs slightly between runs (4112 vs 3856 bytes).
-            "pyarrow/tests/test_csv.py::TestThreadedStreamingCSVRead::test_batch_lifetime"
-          ];
-        });
-        uvloop = prev.uvloop.overridePythonAttrs (o: {
-          disabledTestPaths = (o.disabledTestPaths or [ ]) ++ [
-            # https://github.com/NixOS/nixpkgs/issues/572977
-            "tests/test_process.py::Test_UV_Process_Delayed::test_process_delayed_stdio__not_paused__no_stdin"
-          ];
-        });
-      };
-  };
-  py = python.pkgs;
+    )
+  ) upstream.pythonPins;
+
+  # A stock package that enters this closure must not bring a second version
+  # of a pinned module onto sys.path.
+  replacePinned = map (d: if d ? pname && pinned ? ${d.pname} then pinned.${d.pname} else d);
+
+  claude-agent-sdk = py.claude-agent-sdk.overridePythonAttrs (o: {
+    dependencies = replacePinned (o.dependencies or [ ]);
+  });
 
   # Not in nixpkgs. Pure Python; requires google-re2 (in nixpkgs), lark,
   # jmespath, pendulum, pyyaml. Installed from the pinned upstream wheel.
@@ -175,6 +167,12 @@ let
 
     build-system = [ py.setuptools ];
 
+    # Current nixpkgs-unstable satisfies upstream's certifi>=2026.10.19 floor.
+    # The flake's own lock is slightly older, so relax only omnigent's direct
+    # metadata requirement instead of pinning certifi and changing the hashes
+    # of its many reverse dependencies.
+    pythonRelaxDeps = [ "certifi" ];
+
     # Phase split: the web UI is built offline by `webAssets`; the Python phase
     # must not try to run pnpm.
     env = {
@@ -192,13 +190,10 @@ let
       (with py; [
         pyyaml
         json5
-        openai
         rich
         prompt-toolkit
-        mcp
         starlette
         uvicorn
-        websockets
         httpx
         ftfy
         psutil
@@ -218,8 +213,6 @@ let
         zstandard
         tiktoken
         opentelemetry-api
-        claude-agent-sdk
-        openai-agents
         pyjwt
         argon2-cffi
         packaging
@@ -229,7 +222,14 @@ let
         # PostgreSQL backend (the `postgres` extra): the production database.
         psycopg
       ])
-      ++ py.uvicorn.optional-dependencies.standard
+      ++ (with pinned; [
+        openai
+        openai-agents
+        mcp
+        websockets
+      ])
+      ++ [ claude-agent-sdk ]
+      ++ replacePinned py.uvicorn.optional-dependencies.standard
       ++ py.pyjwt.optional-dependencies.crypto
       ++ lib.optionals withKubernetes [ py.kubernetes ]
       ++ [
@@ -272,7 +272,7 @@ let
   # the daemons, `sys.executable -I` git helpers). A site-patched script wrapper
   # only fixes the first process, so run everything on one `withPackages`
   # interpreter instead.
-  pythonEnv = python.withPackages (_: [ omnigent-lib ]);
+  pythonEnv = python3.withPackages (_: [ omnigent-lib ]);
 in
 callPackage ./launchers.nix { } {
   pname = "omnigent";
@@ -289,7 +289,7 @@ callPackage ./launchers.nix { } {
       pythonEnv
       ;
     # Fixed-output sources of the pinned dependencies, for hash-independence checks.
-    pythonSources = lib.mapAttrs (n: _: py.${n}.src) upstream.pythonPins;
+    pythonSources = lib.mapAttrs (_: p: p.src) pinned;
     # The pinned cel-python wheel (celPython in source.nix), likewise.
     celPythonSource = cel-python.src;
   };
